@@ -3,7 +3,6 @@
 //! view, then uploads the view and overlay buffers straight from wasm memory.
 
 use physand_game::{
-    player,
     spell::{Catalyst, Flask, Form},
     Game, Input, VIEW_H, VIEW_W,
 };
@@ -31,14 +30,129 @@ impl Physand {
 
     // --- Run state -----------------------------------------------------------
 
-    /// 0 = playing, 1 = dead (run over), 2 = floor cleared.
+    /// 0 = playing, 1 = dead (run over), 2 = floor cleared, 3 = victory.
     pub fn phase(&self) -> u8 {
         self.game.phase.code()
     }
 
-    /// Enter the next floor after clearing this one. Returns `false` otherwise.
+    /// 0 = catacomb floor, 1 = Distillery, 2 = boss lair.
+    pub fn stage(&self) -> u8 {
+        self.game.stage.code()
+    }
+
+    /// Enter the Distillery after clearing a floor. Returns `false` otherwise.
     pub fn descend(&mut self) -> bool {
         self.game.descend()
+    }
+
+    pub fn floors_per_run(&self) -> u32 {
+        physand_game::run::FLOORS_PER_RUN
+    }
+
+    // --- Economy, relics, inventory -----------------------------------------
+
+    pub fn gold(&self) -> u32 {
+        self.game.gold
+    }
+
+    pub fn relic_count(&self) -> u32 {
+        self.game.inventory.relics.len() as u32
+    }
+
+    pub fn relic_name(&self, i: u32) -> String {
+        self.relic(i)
+            .map_or_else(String::new, |r| r.name().to_string())
+    }
+
+    pub fn relic_description(&self, i: u32) -> String {
+        self.relic(i)
+            .map_or_else(String::new, |r| r.description().to_string())
+    }
+
+    pub fn relic_color(&self, i: u32) -> u32 {
+        self.relic(i).map_or(0, |r| pack(r.color()))
+    }
+
+    /// Owned reagent material ids.
+    pub fn owned_reagents(&self) -> Vec<u8> {
+        self.game.inventory.reagents.clone()
+    }
+
+    /// Owned forms, as indices into `form_name`.
+    pub fn owned_forms(&self) -> Vec<u8> {
+        let inv = &self.game.inventory;
+        (0..Form::ALL.len() as u8)
+            .filter(|&i| inv.forms.contains(&Form::ALL[i as usize]))
+            .collect()
+    }
+
+    /// Owned catalysts, as indices into `catalyst_name`.
+    pub fn owned_catalysts(&self) -> Vec<u8> {
+        let inv = &self.game.inventory;
+        (0..Catalyst::ALL.len() as u8)
+            .filter(|&i| inv.catalysts.contains(&Catalyst::ALL[i as usize]))
+            .collect()
+    }
+
+    /// Whether flasks may be edited right now (at a Distillery workbench).
+    pub fn can_edit_flasks(&self) -> bool {
+        self.game.can_edit_flasks()
+    }
+
+    // --- Distillery prompt and events ----------------------------------------
+
+    pub fn has_prompt(&self) -> bool {
+        self.game.interact_prompt().is_some()
+    }
+
+    pub fn prompt_title(&self) -> String {
+        self.game
+            .interact_prompt()
+            .map_or_else(String::new, |p| p.title)
+    }
+
+    pub fn prompt_detail(&self) -> String {
+        self.game
+            .interact_prompt()
+            .map_or_else(String::new, |p| p.detail)
+    }
+
+    /// Price in gold, or -1 if free.
+    pub fn prompt_price(&self) -> i32 {
+        self.game
+            .interact_prompt()
+            .and_then(|p| p.price)
+            .map_or(-1, |p| p as i32)
+    }
+
+    pub fn prompt_affordable(&self) -> bool {
+        self.game.interact_prompt().is_some_and(|p| p.affordable)
+    }
+
+    /// The last interaction's outcome, consumed: `"spellcraft"` to open the
+    /// Spellcraft panel, a message for the HUD, or `""` if nothing happened.
+    pub fn take_event(&mut self) -> String {
+        use physand_game::distillery::Interaction;
+        match self.game.last_interaction.take() {
+            None => String::new(),
+            Some(Interaction::OpenSpellcraft) => "spellcraft".into(),
+            Some(Interaction::Took(item)) => format!("Gained {}", item.name()),
+            Some(Interaction::Bought(item)) => format!("Bought {}", item.name()),
+            Some(Interaction::TooPoor { price }) => format!("Not enough gold — {price} needed"),
+            Some(Interaction::Refilled) => "Flasks refilled, wounds eased".into(),
+            Some(Interaction::AlreadyUsed) => "The fountain has run dry".into(),
+        }
+    }
+
+    // --- Boss ------------------------------------------------------------------
+
+    /// Current boss health, or NaN if there is no boss.
+    pub fn boss_hp(&self) -> f32 {
+        self.game.boss_health().map_or(f32::NAN, |h| h.0)
+    }
+
+    pub fn boss_max_hp(&self) -> f32 {
+        self.game.boss_health().map_or(f32::NAN, |h| h.1)
     }
 
     pub fn depth(&self) -> u32 {
@@ -131,7 +245,7 @@ impl Physand {
     }
 
     pub fn max_hp(&self) -> f32 {
-        player::MAX_HP
+        self.game.player.max_hp
     }
 
     pub fn stamina(&self) -> f32 {
@@ -139,7 +253,7 @@ impl Physand {
     }
 
     pub fn max_stamina(&self) -> f32 {
-        player::MAX_STAMINA
+        self.game.player.max_stamina
     }
 
     // --- Flasks ---------------------------------------------------------------
@@ -239,6 +353,31 @@ impl Physand {
         self.game.player.kill();
     }
 
+    /// Debug: count the current floor as cleared.
+    pub fn debug_clear_floor(&mut self) {
+        self.game.debug_clear_floor();
+    }
+
+    /// Debug: jump to the Sandwyrm.
+    pub fn debug_skip_to_boss(&mut self) {
+        self.game.debug_skip_to_boss();
+    }
+
+    /// Debug: slay the Sandwyrm.
+    pub fn debug_slay_boss(&mut self) {
+        self.game.debug_slay_boss();
+    }
+
+    /// Debug: step into the current exit.
+    pub fn debug_enter_exit(&mut self) {
+        self.game.debug_enter_exit();
+    }
+
+    /// Debug: add gold.
+    pub fn debug_add_gold(&mut self, amount: u32) {
+        self.game.gold += amount;
+    }
+
     pub fn player_x(&self) -> i32 {
         self.game.player.x
     }
@@ -267,6 +406,10 @@ impl Physand {
 impl Physand {
     fn flask(&self, index: u32) -> Option<&Flask> {
         self.game.flasks.get(index as usize)
+    }
+
+    fn relic(&self, i: u32) -> Option<physand_game::run::Relic> {
+        self.game.inventory.relics.get(i as usize).copied()
     }
 }
 

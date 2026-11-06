@@ -2,6 +2,7 @@
 //! top of the cell texture, so they are drawn into a separate RGBA buffer.
 
 use crate::player::PLAYER_H;
+use crate::run::Item;
 
 pub type Rgba = [u8; 4];
 
@@ -78,6 +79,26 @@ pub const GOLEM: [&str; 14] = [
     "..SS.SS..",
     "..SS.SS..",
     ".SSS.SSS.",
+];
+
+// Item icons: `#` fill, `o` darker edge, `*` highlight.
+const ICON_REAGENT: [&str; 7] = [
+    "...o...", "..o#o..", ".o##*o.", ".o###o.", "o#####o", "o#####o", ".ooooo.",
+];
+const ICON_FORM: [&str; 7] = [
+    "...o...", "..o#o..", ".o#*#o.", "o##*##o", ".o###o.", "..o#o..", "...o...",
+];
+const ICON_CATALYST: [&str; 7] = [
+    "o..#..o", ".o.#.o.", "..o#o..", "###*###", "..o#o..", ".o.#.o.", "o..#..o",
+];
+const ICON_RELIC: [&str; 7] = [
+    ".ooooo.", "o#*###o", "o##*##o", ".o###o.", "..o#o..", "...o...", ".......",
+];
+const ICON_HEAL: [&str; 7] = [
+    "..ooo..", "..o#o..", "ooo#ooo", "o##*##o", "ooo#ooo", "..o#o..", "..ooo..",
+];
+const ICON_FLASK: [&str; 7] = [
+    "..ooo..", "..o.o..", "..o.o..", ".o#*#o.", "o#####o", "o#####o", ".ooooo.",
 ];
 
 /// Palette for scarab and wraith sprites.
@@ -210,6 +231,76 @@ impl Overlay<'_> {
                 let px = ax + ux * (t as f32 - 3.0) - uy * s as f32;
                 let py = ay + uy * (t as f32 - 3.0) + ux * s as f32;
                 self.put(px.round() as i32, py.round() as i32, c);
+            }
+        }
+    }
+
+    /// A 7×7 item icon centred on `(cx, cy)`; `highlight` draws a frame.
+    pub fn icon(&mut self, cx: i32, cy: i32, item: Item, highlight: bool) {
+        let rows: &[&str; 7] = match item {
+            Item::Reagent(_) => &ICON_REAGENT,
+            Item::Form(_) => &ICON_FORM,
+            Item::Catalyst(_) => &ICON_CATALYST,
+            Item::Relic(_) => &ICON_RELIC,
+            Item::Heal => &ICON_HEAL,
+            Item::Capacity => &ICON_FLASK,
+        };
+        let [r, g, b] = item.color();
+        let shade = |v: u8| (v as f32 * 0.55) as u8;
+        let fill = [r, g, b, 255];
+        let edge = [shade(r), shade(g), shade(b), 255];
+        let shine = [255, 255, 255, 230];
+        self.sprite(
+            cx - 3,
+            cy - 3,
+            rows,
+            |c| match c {
+                b'#' => Some(fill),
+                b'o' => Some(edge),
+                b'*' => Some(shine),
+                _ => None,
+            },
+            1,
+            None,
+        );
+        if highlight {
+            let frame = [255, 225, 140, 200];
+            for d in -5..=5 {
+                for (x, y) in [
+                    (cx + d, cy - 5),
+                    (cx + d, cy + 5),
+                    (cx - 5, cy + d),
+                    (cx + 5, cy + d),
+                ] {
+                    if (d + 5) % 2 == 0 {
+                        self.put(x, y, frame);
+                    }
+                }
+            }
+        }
+    }
+
+    /// A few twinkling points (fountain, workbench).
+    pub fn sparkle(&mut self, cx: i32, cy: i32, c: Rgba, tick: u32) {
+        for i in 0..5u32 {
+            let phase = (tick / 6 + i * 7) % 20;
+            if phase < 10 {
+                let x = cx + ((i * 37 + tick / 30) % 9) as i32 - 4;
+                let y = cy - (phase as i32) / 2 - (i as i32 % 3);
+                self.put(x, y, c);
+            }
+        }
+    }
+
+    /// A filled circle with an outline.
+    pub fn disc(&mut self, cx: i32, cy: i32, r: i32, fill: Rgba, outline: Rgba) {
+        for y in -r..=r {
+            for x in -r..=r {
+                let d2 = x * x + y * y;
+                if d2 <= r * r {
+                    let edge = d2 > (r - 1) * (r - 1);
+                    self.put(cx + x, cy + y, if edge { outline } else { fill });
+                }
             }
         }
     }

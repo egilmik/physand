@@ -46,4 +46,22 @@ fn main() {
     }
     println!("casting step+render: {:?}/tick", t.elapsed() / ticks);
     report(&g, "after casting");
+
+    // The boss arena: the wyrm keeps a lot of sand moving.
+    let t = Instant::now();
+    g.debug_skip_to_boss();
+    println!("arena generation: {:?}", t.elapsed());
+    let t = Instant::now();
+    for _ in 0..ticks {
+        g.set_input(idle);
+        g.step();
+        g.render();
+    }
+    println!(
+        "boss fight step+render: {:?}/tick · awake {}/{} · boss hp {:?}",
+        t.elapsed() / ticks,
+        g.world.awake_chunks(),
+        g.world.chunk_count(),
+        g.boss_health()
+    );
 }

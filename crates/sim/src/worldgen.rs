@@ -104,6 +104,25 @@ pub struct Level {
     pub air_spots: Vec<(i32, i32)>,
     /// Floor positions inside catacomb rooms (for tougher guardians).
     pub room_spots: Vec<(i32, i32)>,
+    /// Named gameplay locations (Distillery stations, boss lair, ...).
+    pub markers: Vec<(Marker, Rect)>,
+}
+
+/// Kinds of gameplay locations a level can mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Marker {
+    /// A reward pedestal in the Distillery.
+    Pedestal,
+    /// A shop slot in the Distillery.
+    ShopSlot,
+    /// The Distillery's refill fountain.
+    Fountain,
+    /// The Distillery's spellcraft workbench.
+    Workbench,
+    /// Where the boss starts.
+    BossLair,
+    /// Where a rift opens once the boss is slain.
+    RiftSpot,
 }
 
 impl Level {
@@ -117,7 +136,17 @@ impl Level {
             ground_spots: Vec::new(),
             air_spots: Vec::new(),
             room_spots: Vec::new(),
+            markers: Vec::new(),
         }
+    }
+
+    /// All marker rectangles of one kind, in order.
+    pub fn marked(&self, kind: Marker) -> Vec<Rect> {
+        self.markers
+            .iter()
+            .filter(|(k, _)| *k == kind)
+            .map(|&(_, r)| r)
+            .collect()
     }
 }
 
@@ -465,6 +494,24 @@ pub fn dune_catacombs(width: u32, height: u32, seed: u32) -> Level {
         }
     }
 
+    // --- Gold: loose nuggets on cave floors, and pockets sealed in the walls.
+    for _ in 0..18 {
+        if let Some((x, y)) = open_spot(&world, &mut rng, spawn.1 + 20, seal_y - 20) {
+            world.paint(x, y, 2, id::GOLD);
+        }
+    }
+    for _ in 0..30 {
+        let x = rng.range(20, (w - 21) as u32) as i32;
+        let y = rng.range((spawn.1 + 30) as u32, (seal_y - 20) as u32) as i32;
+        if matches!(world.get(x, y), id::ROCK | id::SAND | id::SANDSTONE) {
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1), (-1, 0)] {
+                if world.get(x + dx, y + dy) != id::EMPTY {
+                    world.set(x + dx, y + dy, id::GOLD);
+                }
+            }
+        }
+    }
+
     flood_lava(&mut world, lava_top);
 
     // --- The sealed vault ---------------------------------------------------
@@ -560,6 +607,289 @@ pub fn dune_catacombs(width: u32, height: u32, seed: u32) -> Level {
         ground_spots,
         air_spots,
         room_spots,
+        markers: Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The Distillery: a safe room between floors
+// ---------------------------------------------------------------------------
+
+/// Distillery dimensions: exactly one view, so the camera never moves.
+pub const DISTILLERY_W: u32 = 480;
+pub const DISTILLERY_H: u32 = 270;
+
+/// A handcrafted, enemy-free room between floors: three reward pedestals, a
+/// shop counter, a refill fountain, a spellcraft workbench, a water basin
+/// and sand pile to try spells on, and the rift onward.
+pub fn distillery(seed: u32) -> Level {
+    let (w, h) = (DISTILLERY_W as i32, DISTILLERY_H as i32);
+    let mut world = World::new(DISTILLERY_W, DISTILLERY_H, seed);
+    let floor = 236;
+    fill_rect(&mut world, Rect { x: 0, y: 0, w, h }, id::OBSIDIAN);
+    fill_rect(
+        &mut world,
+        Rect {
+            x: 8,
+            y: 40,
+            w: w - 16,
+            h: floor - 40,
+        },
+        id::EMPTY,
+    );
+    // Sandstone masonry: a frieze under the ceiling and a skirting board.
+    fill_rect(
+        &mut world,
+        Rect {
+            x: 8,
+            y: 40,
+            w: w - 16,
+            h: 4,
+        },
+        id::SANDSTONE,
+    );
+    for x in (16..w - 16).step_by(48) {
+        fill_rect(
+            &mut world,
+            Rect {
+                x,
+                y: 44,
+                w: 6,
+                h: 10,
+            },
+            id::SANDSTONE,
+        );
+    }
+
+    let mut markers = Vec::new();
+    // A station is a low plinth (no taller than the alchemist can step over,
+    // so the room can be walked end to end) with an interaction zone above.
+    fn station(
+        world: &mut World,
+        markers: &mut Vec<(Marker, Rect)>,
+        kind: Marker,
+        cx: i32,
+        mat: u8,
+    ) {
+        let floor = 236;
+        fill_rect(
+            world,
+            Rect {
+                x: cx - 5,
+                y: floor - 3,
+                w: 11,
+                h: 3,
+            },
+            mat,
+        );
+        markers.push((
+            kind,
+            Rect {
+                x: cx - 9,
+                y: floor - 24,
+                w: 19,
+                h: 22,
+            },
+        ));
+    }
+
+    // Fountain: a basin sunk into the floor, rimmed with sandstone, to wade through.
+    let fountain_x = 70;
+    fill_rect(
+        &mut world,
+        Rect {
+            x: fountain_x - 12,
+            y: floor,
+            w: 25,
+            h: 5,
+        },
+        id::SANDSTONE,
+    );
+    fill_rect(
+        &mut world,
+        Rect {
+            x: fountain_x - 10,
+            y: floor,
+            w: 21,
+            h: 3,
+        },
+        id::WATER,
+    );
+    markers.push((
+        Marker::Fountain,
+        Rect {
+            x: fountain_x - 13,
+            y: floor - 22,
+            w: 27,
+            h: 25,
+        },
+    ));
+
+    // Workbench: a low wooden counter.
+    let bench_x = 116;
+    fill_rect(
+        &mut world,
+        Rect {
+            x: bench_x - 8,
+            y: floor - 3,
+            w: 17,
+            h: 3,
+        },
+        id::WOOD,
+    );
+    fill_rect(
+        &mut world,
+        Rect {
+            x: bench_x - 9,
+            y: floor - 3,
+            w: 19,
+            h: 1,
+        },
+        id::WOOD,
+    );
+    markers.push((
+        Marker::Workbench,
+        Rect {
+            x: bench_x - 11,
+            y: floor - 24,
+            w: 23,
+            h: 22,
+        },
+    ));
+
+    for cx in [180, 214, 248] {
+        station(
+            &mut world,
+            &mut markers,
+            Marker::Pedestal,
+            cx,
+            id::SANDSTONE,
+        );
+    }
+    for cx in [318, 346, 374] {
+        station(&mut world, &mut markers, Marker::ShopSlot, cx, id::WOOD);
+    }
+
+    // Something to experiment on.
+    fill_ellipse(&mut world, 285, floor - 1, 10, 6, id::SAND);
+
+    // The rift onward, in an alcove on the right.
+    let exit = Rect {
+        x: w - 40,
+        y: floor - 34,
+        w: 22,
+        h: 34,
+    };
+
+    let spawn = (30, floor - 1);
+    for _ in 0..60 {
+        world.step();
+    }
+    fill_rect(
+        &mut world,
+        Rect {
+            x: 8,
+            y: 40,
+            w: w - 16,
+            h: 4,
+        },
+        id::SANDSTONE,
+    );
+    world.wake_all();
+
+    Level {
+        exit: Some(exit),
+        markers,
+        ..Level::new(world, spawn)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The Sandwyrm's lair
+// ---------------------------------------------------------------------------
+
+pub const ARENA_W: u32 = 768;
+pub const ARENA_H: u32 = 384;
+
+/// A wide obsidian-shelled chamber: deep sand dunes for the wyrm to swim
+/// through, rock pillars, a water pool, an oil pocket and a ledge to start on.
+pub fn wyrm_arena(seed: u32) -> Level {
+    let (w, h) = (ARENA_W as i32, ARENA_H as i32);
+    let mut world = World::new(ARENA_W, ARENA_H, seed);
+    let mut rng = Rng::new(seed ^ 0x5A4D_3077);
+    fill_rect(&mut world, Rect { x: 0, y: 0, w, h }, id::OBSIDIAN);
+    fill_rect(
+        &mut world,
+        Rect {
+            x: 6,
+            y: 6,
+            w: w - 12,
+            h: h - 12,
+        },
+        id::EMPTY,
+    );
+
+    // Dunes: a rolling sand sea over a rock bed.
+    let dune_seed = rng.next_u32();
+    for x in 6..w - 6 {
+        let top = 250 + (value_noise(x, 0, 60, dune_seed) * 50.0) as i32;
+        for y in top..h - 6 {
+            world.set(x, y, if y > h - 40 { id::ROCK } else { id::SAND });
+        }
+    }
+    // Rock pillars rising out of the sand.
+    for cx in [190, 384, 578] {
+        let pw = rng.range(14, 22) as i32;
+        let top = rng.range(150, 200) as i32;
+        fill_rect(
+            &mut world,
+            Rect {
+                x: cx - pw / 2,
+                y: top,
+                w: pw,
+                h: h - 40 - top,
+            },
+            id::ROCK,
+        );
+    }
+    // A water pool on the right and an oil pocket on the left.
+    fill_ellipse(&mut world, 660, 262, 40, 14, id::EMPTY);
+    fill_ellipse(&mut world, 660, 268, 38, 10, id::WATER);
+    fill_ellipse(&mut world, 110, 300, 18, 8, id::OIL);
+
+    // Starting ledge, high on the left wall.
+    let spawn = (40, 120);
+    fill_rect(
+        &mut world,
+        Rect {
+            x: 6,
+            y: spawn.1 + 1,
+            w: 70,
+            h: 5,
+        },
+        id::ROCK,
+    );
+
+    settle(&mut world, spawn, 120);
+
+    // Deep in the sand between the middle and right pillars.
+    let lair = Rect {
+        x: w / 2 + 67,
+        y: 300,
+        w: 60,
+        h: 30,
+    };
+    // Just above the dunes between the left and middle pillars, within a
+    // jump of the sand.
+    let rift = Rect {
+        x: w / 2 - 112,
+        y: 212,
+        w: 24,
+        h: 30,
+    };
+    Level {
+        markers: vec![(Marker::BossLair, lair), (Marker::RiftSpot, rift)],
+        ..Level::new(world, spawn)
     }
 }
 

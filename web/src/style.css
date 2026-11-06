@@ -185,6 +185,72 @@ html, body {
   text-shadow: 0 1px 2px #000;
 }
 
+/* ---- M4: gold, relics, boss, prompts ---- */
+#gold {
+  margin-top: 2px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: #ffd75a;
+  text-shadow: 0 1px 2px #000;
+}
+
+#relics { display: flex; gap: 3px; margin-top: 2px; pointer-events: auto; }
+
+.relic {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid #0008;
+  box-shadow: 0 0 4px #fff4;
+  cursor: help;
+}
+
+#boss-bar {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(320px, 45%);
+  --bar: #c58a3a;
+}
+
+#boss-bar[hidden], #prompt[hidden], #toast[hidden] { display: none; }
+
+#prompt {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 24px);
+  padding: 6px 12px;
+  text-align: center;
+  background: #0b0912e6;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+#prompt.poor { border-color: #d9534f; }
+#prompt-title { font-size: 13px; font-weight: 600; color: #fff; }
+#prompt.poor #prompt-title { color: #ff9f8f; }
+#prompt-detail { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+#toast {
+  position: absolute;
+  bottom: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  font-size: 13px;
+  color: #fff;
+  background: #2a2140e6;
+  border-radius: 6px;
+  pointer-events: none;
+  text-shadow: 0 1px 2px #000;
+}
+
+#controls button:disabled { opacity: 0.45; cursor: not-allowed; }
+
 #modes { display: flex; gap: 4px; }
 
 #modes button {

@@ -7,7 +7,6 @@ import init, {
   material_color,
   material_count,
   material_name,
-  reagent_ids,
 } from "./wasm/physand.js";
 import { Renderer, type MaterialIds } from "./renderer";
 
@@ -17,7 +16,11 @@ const TICK_MS = 1000 / TICK_HZ;
 const MAX_TICKS_PER_FRAME = 4;
 
 // Must match `Input::*` bit flags in crates/game/src/input.rs.
-const INPUT = { LEFT: 1, RIGHT: 2, JUMP: 4, CAST: 8, DIG: 16 } as const;
+const INPUT = { LEFT: 1, RIGHT: 2, JUMP: 4, CAST: 8, DIG: 16, INTERACT: 32 } as const;
+
+// Must match `Phase::code` / `Stage::code` in crates/game/src/game.rs.
+const PHASE = { PLAYING: 0, DEAD: 1, CLEARED: 2, VICTORY: 3 } as const;
+const STAGE = { FLOOR: 0, DISTILLERY: 1, BOSS: 2 } as const;
 
 type Mode = "alchemist" | "brush";
 
@@ -82,6 +85,9 @@ async function main() {
     paused: false,
   };
   const keys = new Set<string>();
+  // Keys pressed since the last frame, so a tap shorter than a frame
+  // (released before the game loop runs) still registers.
+  const tapped = new Set<string>();
   const mouse = { x: VIEW_W / 2, y: VIEW_H / 2, left: false, right: false };
 
   // ---- Mode toggle ----------------------------------------------------------
@@ -141,12 +147,13 @@ async function main() {
   $<HTMLButtonElement>("#reset").addEventListener("click", newLevel);
 
   // ---- Keyboard -------------------------------------------------------------
-  const GAME_KEYS = new Set(["KeyA", "KeyD", "KeyW", "ArrowLeft", "ArrowRight", "ArrowUp", "Space"]);
+  const GAME_KEYS = new Set(["KeyA", "KeyD", "KeyW", "KeyE", "ArrowLeft", "ArrowRight", "ArrowUp", "Space"]);
   window.addEventListener("keydown", (e) => {
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
     if (GAME_KEYS.has(e.code)) {
       e.preventDefault();
       keys.add(e.code);
+      tapped.add(e.code);
       return;
     }
     if (e.repeat) return;
@@ -157,7 +164,7 @@ async function main() {
       togglePause();
     } else if (e.code === "KeyR") {
       newLevel();
-    } else if (e.code === "Enter" && game.phase() === 2) {
+    } else if (e.code === "Enter" && game.phase() !== PHASE.PLAYING) {
       e.preventDefault();
       advance();
     } else if (e.code === "KeyC") {
@@ -238,10 +245,13 @@ async function main() {
   };
 
   const inputBits = () => {
+    const down = (...codes: string[]) => codes.some((c) => keys.has(c) || tapped.has(c));
     let bits = 0;
-    if (keys.has("KeyA") || keys.has("ArrowLeft")) bits |= INPUT.LEFT;
-    if (keys.has("KeyD") || keys.has("ArrowRight")) bits |= INPUT.RIGHT;
-    if (keys.has("KeyW") || keys.has("ArrowUp") || keys.has("Space")) bits |= INPUT.JUMP;
+    if (down("KeyA", "ArrowLeft")) bits |= INPUT.LEFT;
+    if (down("KeyD", "ArrowRight")) bits |= INPUT.RIGHT;
+    if (down("KeyW", "ArrowUp", "Space")) bits |= INPUT.JUMP;
+    if (down("KeyE")) bits |= INPUT.INTERACT;
+    tapped.clear();
     if (state.mode === "alchemist") {
       if (mouse.left) bits |= INPUT.CAST;
       if (mouse.right) bits |= INPUT.DIG;
@@ -265,6 +275,15 @@ async function main() {
   let shownPhase = -1;
   bannerAction.addEventListener("click", () => advance());
   const flaskName = $<HTMLDivElement>("#flask-name");
+  const goldEl = $<HTMLDivElement>("#gold");
+  const relicsEl = $<HTMLDivElement>("#relics");
+  const bossBar = $<HTMLDivElement>("#boss-bar");
+  const bossFill = $<HTMLSpanElement>("#boss-bar .fill");
+  const promptEl = $<HTMLDivElement>("#prompt");
+  const promptTitle = $<HTMLDivElement>("#prompt-title");
+  const promptDetail = $<HTMLDivElement>("#prompt-detail");
+  const toastEl = $<HTMLDivElement>("#toast");
+  const spellcraftBtn = $<HTMLButtonElement>("#spellcraft-open");
   const hexColor = (c: number) => `#${c.toString(16).padStart(6, "0")}`;
 
   // Flask hotbar: one tile per flask, its fill level shows the volume.
@@ -297,53 +316,122 @@ async function main() {
     const name = game.flask_name(active);
     if (flaskName.textContent !== name) flaskName.textContent = name;
 
-    setText(
-      runStats,
-      `Floor ${game.depth()} · ${game.kills()} slain · ${clock(game.run_seconds())}`,
-    );
+    // Where we are, and what to do here.
+    const stageNow = game.stage();
+    const floors = game.floors_per_run();
+    const where =
+      stageNow === STAGE.FLOOR
+        ? `Floor ${game.depth()}/${floors}`
+        : stageNow === STAGE.DISTILLERY
+          ? "The Distillery"
+          : "The Sandwyrm's lair";
+    setText(runStats, `${where} · ${game.kills()} slain · ${clock(game.run_seconds())}`);
+    setText(goldEl, `${game.gold()} gold`);
+    const bossAlive = !Number.isNaN(game.boss_hp());
     setText(
       objective,
-      game.seal_open()
-        ? "The seal is breached — enter the rift below"
-        : "Find the wax seal at the bottom (follow the arrow). Heat melts wax.",
+      stageNow === STAGE.DISTILLERY
+        ? "Take one reward, spend gold, refill at the fountain, then step into the rift"
+        : stageNow === STAGE.BOSS
+          ? bossAlive
+            ? "Slay the Sandwyrm — water erodes it, heat glazes it to brittle glass"
+            : "The Sandwyrm is slain — its rift has opened"
+          : game.seal_open()
+            ? "The seal is breached — enter the rift below"
+            : "Find the wax seal at the bottom (follow the arrow). Heat melts wax.",
     );
 
-    // Run over / floor cleared screens.
+    // Boss bar.
+    bossBar.hidden = !bossAlive;
+    if (bossAlive) setFill(bossFill, game.boss_hp(), game.boss_max_hp());
+
+    // Relics (rebuilt only when the count changes).
+    const relicCount = game.relic_count();
+    if (relicCount !== shownRelics) {
+      shownRelics = relicCount;
+      relicsEl.replaceChildren();
+      for (let i = 0; i < relicCount; i++) {
+        const r = document.createElement("span");
+        r.className = "relic";
+        r.style.background = hexColor(game.relic_color(i));
+        r.title = `${game.relic_name(i)} — ${game.relic_description(i)}`;
+        relicsEl.append(r);
+      }
+      renderRecipes();
+    }
+
+    // Station prompt.
+    if (game.has_prompt()) {
+      const price = game.prompt_price();
+      const cost = price >= 0 ? ` · ${price} gold` : "";
+      setText(promptTitle, `E — ${game.prompt_title()}${cost}`);
+      setText(promptDetail, game.prompt_detail());
+      promptEl.classList.toggle("poor", !game.prompt_affordable());
+      promptEl.hidden = false;
+    } else {
+      promptEl.hidden = true;
+    }
+
+    // Spellcraft is only available at a workbench.
+    const canEdit = game.can_edit_flasks();
+    spellcraftBtn.disabled = !canEdit;
+    spellcraftBtn.title = canEdit ? "Edit flasks (C)" : "Flasks can only be reworked at a Distillery workbench";
+    if (!canEdit && !spellcraft.hidden) toggleSpellcraft(false);
+
+    // Run over / floor cleared / victory screens.
     const phase = game.phase();
     if (phase !== shownPhase) {
       shownPhase = phase;
-      banner.hidden = phase === 0;
-      banner.classList.toggle("dead", phase === 1);
-      if (phase === 1) {
+      banner.hidden = phase === PHASE.PLAYING;
+      banner.classList.toggle("dead", phase === PHASE.DEAD);
+      const stats = `${game.kills()} creatures slain · ${game.gold()} gold · ${clock(game.run_seconds())}`;
+      if (phase === PHASE.DEAD) {
         bannerTitle.textContent = "The catacombs claim you";
-        bannerStats.innerHTML =
-          `Reached floor ${game.depth()} · ${game.kills()} creatures slain · ${clock(game.run_seconds())}`;
+        bannerStats.innerHTML = `${where} · ${stats}`;
         bannerAction.textContent = "New run (R)";
-      } else if (phase === 2) {
+      } else if (phase === PHASE.CLEARED) {
         bannerTitle.textContent = `Floor ${game.depth()} cleared`;
         bannerStats.innerHTML =
-          `Floor time ${clock(game.floor_seconds())} · ${game.kills()} slain so far` +
-          `<br>Descending restores some health and refills your flasks.`;
+          `Floor time ${clock(game.floor_seconds())} · ${stats}` +
+          `<br>A Distillery waits below: a reward, a shop, and a fountain.`;
         bannerAction.textContent = "Descend (Enter)";
+      } else if (phase === PHASE.VICTORY) {
+        bannerTitle.textContent = "The Sandwyrm is slain";
+        bannerStats.innerHTML =
+          `You conquered the Dune Catacombs · ${stats}` +
+          `<br>Deeper biomes are still being dug. For now: start again, try new recipes.`;
+        bannerAction.textContent = "New run (Enter)";
       }
-      if (phase !== 0) bannerAction.focus({ preventScroll: true });
+      if (phase !== PHASE.PLAYING) bannerAction.focus({ preventScroll: true });
     }
+
+    // Interaction results.
+    const ev = game.take_event();
+    if (ev === "spellcraft") toggleSpellcraft(true);
+    else if (ev) showToast(ev);
+  };
+  let shownRelics = -1;
+  let toastTimer = 0;
+  const showToast = (text: string) => {
+    toastEl.textContent = text;
+    toastEl.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => (toastEl.hidden = true), 2200);
   };
   const setText = (el: HTMLElement, text: string) => {
     if (el.textContent !== text) el.textContent = text;
   };
-  /** Banner action: descend after a clear, or start over after death. */
+  /** Banner action: descend after a clear, or start over after death/victory. */
   function advance() {
     const phase = game.phase();
-    if (phase === 2) game.descend();
-    else if (phase === 1) newLevel();
+    if (phase === PHASE.CLEARED) game.descend();
+    else if (phase === PHASE.DEAD || phase === PHASE.VICTORY) newLevel();
     renderRecipes();
   }
 
   // ---- Spellcraft ------------------------------------------------------------
   const spellcraft = $<HTMLElement>("#spellcraft");
   const recipesEl = $<HTMLDivElement>("#recipes");
-  const reagentIds = Array.from(reagent_ids());
   const forms = Array.from({ length: form_count() }, (_, i) => form_name(i));
   const catalysts = Array.from({ length: catalyst_count() }, (_, i) => catalyst_name(i));
   const NONE = 255;
@@ -383,17 +471,20 @@ async function main() {
         }
       };
 
+      // Only components you own can be slotted.
       const slots = document.createElement("div");
       slots.className = "slots";
-      const reagentOpts: [number, string][] = reagentIds.map((m) => [m, names[m]]);
+      const reagentOpts: [number, string][] = Array.from(game.owned_reagents(), (m) => [m, names[m]]);
       recipe.r.forEach((v, s) => {
         const opts: [number, string][] = s === 0 ? reagentOpts : [[NONE, "—"], ...reagentOpts];
         slots.append(select(`Reagent ${s + 1}`, opts, v, (nv) => ((recipe.r[s] = nv), apply())));
       });
-      slots.append(
-        select("Form", forms.map((f, k) => [k, f]), recipe.form, (nv) => ((recipe.form = nv), apply())),
-      );
-      const catOpts: [number, string][] = [[NONE, "—"], ...catalysts.map((c, k): [number, string] => [k, c])];
+      const formOpts: [number, string][] = Array.from(game.owned_forms(), (k) => [k, forms[k]]);
+      slots.append(select("Form", formOpts, recipe.form, (nv) => ((recipe.form = nv), apply())));
+      const catOpts: [number, string][] = [
+        [NONE, "—"],
+        ...Array.from(game.owned_catalysts(), (k): [number, string] => [k, catalysts[k]]),
+      ];
       recipe.c.forEach((v, s) => {
         slots.append(select(`Catalyst ${s + 1}`, catOpts, v, (nv) => ((recipe.c[s] = nv), apply())));
       });
@@ -407,6 +498,10 @@ async function main() {
   }
 
   function toggleSpellcraft(open = spellcraft.hidden) {
+    if (open && !game.can_edit_flasks()) {
+      showToast("Flasks can only be reworked at a Distillery workbench");
+      return;
+    }
     spellcraft.hidden = !open;
     if (open) renderRecipes();
   }

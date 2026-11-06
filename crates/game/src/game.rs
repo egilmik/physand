@@ -1,19 +1,24 @@
-//! Top-level game state: the run, the current floor, the player, enemies,
-//! spell particles and camera.
+//! Top-level game state: the run (stage, inventory, gold), the current level,
+//! the player, creatures, spell particles and camera.
 
 use physand_sim::{
     id,
     material::props,
     rng::Rng,
-    worldgen::{dune_catacombs, Level, Rect},
+    worldgen::{distillery, dune_catacombs, wyrm_arena, Level, Marker, Rect},
     GpuCell, World,
 };
 
+use crate::distillery::{Distillery, Interaction, Prompt, StationKind};
 use crate::enemy::{Enemy, EnemyEvent, EnemyKind, BAKE_TEMP};
 use crate::input::Input;
 use crate::player::{Player, PLAYER_H, PLAYER_W};
 use crate::render::{self, Overlay, Rgba, Tint};
-use crate::spell::{starter_flasks, CastCtx, Catalyst, Flask, Flight, Particle, ParticleKind};
+use crate::run::{Inventory, Item, Modifiers, CAPACITY_BONUS, FLOORS_PER_RUN, HEAL_AMOUNT};
+use crate::spell::{
+    starter_flasks, CastCtx, Catalyst, Flask, Flight, Form, Particle, ParticleKind, BASE_REGEN,
+};
+use crate::wyrm::{Wyrm, HEAD_RADIUS, SEGMENT_RADIUS};
 
 pub const WORLD_W: u32 = 1024;
 pub const WORLD_H: u32 = 768;
@@ -29,17 +34,19 @@ const CAMERA_LOOKAHEAD: f32 = 0.2;
 /// Most damage the player can take from explosions in a single tick, so a
 /// chain reaction of tiny blasts is not instantly lethal.
 const MAX_BLAST_DAMAGE_PER_TICK: f32 = 25.0;
-/// HP restored when descending to a new floor.
-const DESCEND_HEAL: f32 = 30.0;
+/// The Distillery fountain restores this fraction of maximum health.
+const FOUNTAIN_HEAL: f32 = 0.25;
 
-/// Where the run stands.
+/// Where the run stands right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Playing,
     /// The alchemist died; the run is over.
     Dead,
-    /// Reached the floor's exit.
+    /// Reached a floor's exit.
     Cleared,
+    /// The Sandwyrm is slain and its rift taken: the run is won.
+    Victory,
 }
 
 impl Phase {
@@ -48,8 +55,37 @@ impl Phase {
             Phase::Playing => 0,
             Phase::Dead => 1,
             Phase::Cleared => 2,
+            Phase::Victory => 3,
         }
     }
+}
+
+/// Which part of the run the current level is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// A catacomb floor (1-based).
+    Floor(u32),
+    /// The safe room after the given floor.
+    Distillery(u32),
+    /// The Sandwyrm's lair.
+    Boss,
+}
+
+impl Stage {
+    pub fn code(self) -> u8 {
+        match self {
+            Stage::Floor(_) => 0,
+            Stage::Distillery(_) => 1,
+            Stage::Boss => 2,
+        }
+    }
+}
+
+/// A creature a particle can strike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Enemy(usize),
+    Segment(usize),
 }
 
 pub struct Game {
@@ -57,13 +93,26 @@ pub struct Game {
     pub player: Player,
     pub flasks: Vec<Flask>,
     pub enemies: Vec<Enemy>,
+    pub wyrm: Option<Wyrm>,
+    pub inventory: Inventory,
+    pub gold: u32,
+    pub stage: Stage,
+    /// Sandbox games (tests, prepared levels) own everything and may edit
+    /// flasks anywhere.
+    pub sandbox: bool,
+    distillery: Option<Distillery>,
     active_flask: usize,
     particles: Vec<Particle>,
     exit: Option<Rect>,
     seal: Option<Rect>,
     seal_open: bool,
+    rift_spot: Option<Rect>,
     input: Input,
     prev_jump: bool,
+    prev_interact: bool,
+    pending_interact: bool,
+    pub last_interaction: Option<Interaction>,
+    mods: Modifiers,
     rng: Rng,
     cam_x: f32,
     cam_y: f32,
@@ -71,10 +120,10 @@ pub struct Game {
     overlay: Vec<Rgba>,
     pub phase: Phase,
     run_seed: u32,
-    /// Floor number, starting at 1.
+    /// Deepest floor reached, starting at 1.
     pub depth: u32,
     pub kills: u32,
-    /// Ticks spent playing this run / this floor.
+    /// Ticks spent playing this run / this level.
     pub run_ticks: u32,
     pub floor_ticks: u32,
     /// Deaths this run (0 or 1 with permadeath; kept for stats).
@@ -82,26 +131,48 @@ pub struct Game {
 }
 
 impl Game {
-    /// Start a new run on floor 1.
+    /// Start a new run on floor 1 with the starter kit.
     pub fn new(seed: u32) -> Game {
-        Self::from_level(dune_catacombs(WORLD_W, WORLD_H, seed), seed)
+        let mut g = Self::bare(seed, (0, 0));
+        g.sandbox = false;
+        g.inventory = Inventory::starter();
+        g.enter_level(dune_catacombs(WORLD_W, WORLD_H, seed), Stage::Floor(1));
+        g
     }
 
-    /// Start on a prepared level (tests and sandboxes). Enemies are placed at
-    /// the level's spawn spots, if it has any.
+    /// A sandbox game on a prepared level (tests, experiments): everything
+    /// is owned and flasks can be edited anywhere. Enemies are placed at the
+    /// level's spawn spots, if it has any.
     pub fn from_level(level: Level, seed: u32) -> Game {
-        let mut game = Game {
+        let mut g = Self::bare(seed, level.spawn);
+        g.enter_level(level, Stage::Floor(1));
+        g
+    }
+
+    fn bare(seed: u32, spawn: (i32, i32)) -> Game {
+        Game {
             world: World::new(1, 1, seed),
-            player: Player::new(level.spawn.0, level.spawn.1),
+            player: Player::new(spawn.0, spawn.1),
             flasks: starter_flasks(),
             enemies: Vec::new(),
+            wyrm: None,
+            inventory: Inventory::everything(),
+            gold: 0,
+            stage: Stage::Floor(1),
+            sandbox: true,
+            distillery: None,
             active_flask: 0,
             particles: Vec::new(),
             exit: None,
             seal: None,
             seal_open: false,
+            rift_spot: None,
             input: Input::default(),
             prev_jump: false,
+            prev_interact: false,
+            pending_interact: false,
+            last_interaction: None,
+            mods: Modifiers::default(),
             rng: Rng::new(seed ^ 0x5EED_0001),
             cam_x: 0.0,
             cam_y: 0.0,
@@ -114,13 +185,25 @@ impl Game {
             run_ticks: 0,
             floor_ticks: 0,
             deaths: 0,
-        };
-        game.enter_floor(level);
-        game
+        }
     }
 
-    /// Install a floor: world, markers, enemies, player at the spawn.
-    fn enter_floor(&mut self, level: Level) {
+    /// Install a level: world, markers, creatures, player at the spawn.
+    fn enter_level(&mut self, level: Level, stage: Stage) {
+        self.stage = stage;
+        self.distillery = match stage {
+            Stage::Distillery(_) => Some(Distillery::stock(&level, &self.inventory, &mut self.rng)),
+            _ => None,
+        };
+        self.wyrm = match stage {
+            Stage::Boss => level.marked(Marker::BossLair).first().map(|r| {
+                let (x, y) = r.center();
+                Wyrm::new(x as f32, y as f32)
+            }),
+            _ => None,
+        };
+        self.rift_spot = level.marked(Marker::RiftSpot).first().copied();
+
         let Level {
             world,
             spawn,
@@ -129,6 +212,7 @@ impl Game {
             ground_spots,
             air_spots,
             room_spots,
+            markers: _,
         } = level;
         self.world = world;
         self.exit = exit;
@@ -137,12 +221,15 @@ impl Game {
         self.particles.clear();
         self.floor_ticks = 0;
         self.phase = Phase::Playing;
+        self.last_interaction = None;
 
-        let hp = self.player.hp;
-        let stamina = self.player.stamina;
+        // Keep health, stamina and relic effects across levels.
+        let old = self.player.clone();
         self.player = Player::new(spawn.0, spawn.1);
-        self.player.hp = hp;
-        self.player.stamina = stamina;
+        self.player.max_hp = old.max_hp;
+        self.player.hp = old.hp;
+        self.player.stamina = old.stamina;
+        self.apply_modifiers();
 
         self.enemies = self.populate(&ground_spots, &air_spots, &room_spots);
 
@@ -178,27 +265,82 @@ impl Game {
         enemies
     }
 
-    /// Generate and enter the next floor (only after clearing this one).
+    fn level_seed(&self, salt: u32) -> u32 {
+        self.run_seed
+            .wrapping_mul(0x9E37_79B9)
+            .wrapping_add(salt.wrapping_mul(0x85EB_CA6B))
+    }
+
+    /// After clearing a floor: enter the Distillery. Returns `false` unless
+    /// a floor has just been cleared.
     pub fn descend(&mut self) -> bool {
+        let Stage::Floor(n) = self.stage else {
+            return false;
+        };
         if self.phase != Phase::Cleared {
             return false;
         }
-        self.depth += 1;
-        let seed = self
-            .run_seed
-            .wrapping_mul(0x9E37_79B9)
-            .wrapping_add(self.depth.wrapping_mul(0x85EB_CA6B));
-        self.player.heal(DESCEND_HEAL);
-        for f in &mut self.flasks {
-            f.refill();
-        }
-        self.enter_floor(dune_catacombs(WORLD_W, WORLD_H, seed));
+        let level = distillery(self.level_seed(1000 + n));
+        self.enter_level(level, Stage::Distillery(n));
         true
     }
+
+    /// Leave the Distillery through its rift: the next floor, or the boss.
+    fn leave_distillery(&mut self) {
+        let Stage::Distillery(n) = self.stage else {
+            return;
+        };
+        if n < FLOORS_PER_RUN {
+            self.depth = n + 1;
+            let level = dune_catacombs(WORLD_W, WORLD_H, self.level_seed(n + 1));
+            self.enter_level(level, Stage::Floor(n + 1));
+        } else {
+            self.enter_level(wyrm_arena(self.level_seed(99)), Stage::Boss);
+        }
+    }
+
+    /// Recompute relic effects on the player and flasks.
+    fn apply_modifiers(&mut self) {
+        self.mods = self.inventory.modifiers();
+        self.player.apply(&self.mods);
+        for f in &mut self.flasks {
+            f.regen = BASE_REGEN * self.mods.flask_regen;
+        }
+    }
+
+    /// Give the player an item.
+    pub fn grant(&mut self, item: Item) {
+        match item {
+            Item::Heal => self.player.heal(HEAL_AMOUNT),
+            Item::Capacity => {
+                for f in &mut self.flasks {
+                    f.capacity += CAPACITY_BONUS;
+                    f.refill();
+                }
+            }
+            _ => {
+                self.inventory.add(item);
+                self.apply_modifiers();
+            }
+        }
+    }
+
+    pub fn modifiers(&self) -> &Modifiers {
+        &self.mods
+    }
+
+    // ---------------------------------------------------------------------
+    // Debug and test helpers
+    // ---------------------------------------------------------------------
 
     /// Spawn an enemy (tests, debugging).
     pub fn add_enemy(&mut self, kind: EnemyKind, x: i32, y: i32) {
         self.enemies.push(Enemy::new(kind, x, y));
+    }
+
+    /// Spawn the Sandwyrm (tests, debugging).
+    pub fn spawn_wyrm(&mut self, x: f32, y: f32) {
+        self.wyrm = Some(Wyrm::new(x, y));
     }
 
     /// Debug: move the player into the antechamber just above the seal.
@@ -209,11 +351,48 @@ impl Game {
         }
     }
 
+    /// Debug: count the current floor as cleared.
+    pub fn debug_clear_floor(&mut self) {
+        if matches!(self.stage, Stage::Floor(_)) && self.phase == Phase::Playing {
+            self.phase = Phase::Cleared;
+        }
+    }
+
+    /// Debug: jump straight to the boss.
+    pub fn debug_skip_to_boss(&mut self) {
+        self.depth = FLOORS_PER_RUN;
+        self.stage = Stage::Distillery(FLOORS_PER_RUN);
+        self.leave_distillery();
+    }
+
+    /// Debug: step into the current exit, if there is one.
+    pub fn debug_enter_exit(&mut self) {
+        if let Some(e) = self.exit {
+            let (ex, ey) = e.center();
+            self.player.body = crate::body::Body::standing(ex, ey + 4, PLAYER_W, PLAYER_H);
+        }
+    }
+
+    /// Debug: slay the boss.
+    pub fn debug_slay_boss(&mut self) {
+        if let Some(w) = &mut self.wyrm {
+            w.segments[0].hp = 0.0;
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Accessors
+    // ---------------------------------------------------------------------
+
     pub fn set_input(&mut self, input: Input) {
         if input.jump && !self.prev_jump {
             self.player.press_jump();
         }
+        if input.interact && !self.prev_interact {
+            self.pending_interact = true;
+        }
         self.prev_jump = input.jump;
+        self.prev_interact = input.interact;
         self.input = input;
     }
 
@@ -269,6 +448,42 @@ impl Game {
         self.enemies.len()
     }
 
+    pub fn distillery(&self) -> Option<&Distillery> {
+        self.distillery.as_ref()
+    }
+
+    /// Index of the Distillery station the player is standing at.
+    fn station_here(&self) -> Option<usize> {
+        let (px, py) = self.player.center();
+        self.distillery.as_ref()?.at(px, py)
+    }
+
+    /// The prompt for the station the player is standing at.
+    pub fn interact_prompt(&self) -> Option<Prompt> {
+        let i = self.station_here()?;
+        Some(self.distillery.as_ref()?.prompt(i, self.gold))
+    }
+
+    /// Flasks can be edited in sandboxes, or at a Distillery workbench.
+    pub fn can_edit_flasks(&self) -> bool {
+        if self.sandbox {
+            return true;
+        }
+        match (self.station_here(), &self.distillery) {
+            (Some(i), Some(d)) => d.stations[i].kind == StationKind::Workbench,
+            _ => false,
+        }
+    }
+
+    /// Boss health (current, maximum), if a boss is present.
+    pub fn boss_health(&self) -> Option<(f32, f32)> {
+        self.wyrm.as_ref().map(|w| (w.total_hp(), w.max_hp()))
+    }
+
+    // ---------------------------------------------------------------------
+    // Simulation
+    // ---------------------------------------------------------------------
+
     pub fn step(&mut self) {
         let playing = self.phase == Phase::Playing && self.player.alive();
         let input = if playing {
@@ -282,6 +497,9 @@ impl Game {
         };
 
         if playing {
+            if std::mem::take(&mut self.pending_interact) {
+                self.interact();
+            }
             if input.dig {
                 self.dig(input.aim_x, input.aim_y);
             }
@@ -301,22 +519,87 @@ impl Game {
                 };
                 self.flasks[self.active_flask].cast(&mut ctx);
             }
+            // Collect before moving too, or loose gold inside the body would
+            // be shoved aside like sand instead of picked up.
+            self.collect_gold();
             self.player.update(&mut self.world, &input);
+            self.collect_gold();
+        } else {
+            self.pending_interact = false;
         }
 
-        self.update_enemies(playing);
+        self.update_creatures(playing);
         for flask in &mut self.flasks {
             flask.tick();
         }
         self.update_particles();
         self.world.step();
         self.apply_explosions();
-        self.reap_enemies();
+        self.reap_creatures();
         self.check_progress();
         self.update_camera();
     }
 
-    fn update_enemies(&mut self, playing: bool) {
+    /// Use the Distillery station the player is standing at.
+    fn interact(&mut self) {
+        let Some(i) = self.station_here() else { return };
+        let Some(d) = self.distillery.as_mut() else {
+            return;
+        };
+        let station = d.stations[i];
+        let result = match station.kind {
+            StationKind::Reward(item) => {
+                d.take_reward();
+                self.grant(item);
+                Interaction::Took(item)
+            }
+            StationKind::Shop(item) => {
+                let price = item.price();
+                if self.gold < price {
+                    Interaction::TooPoor { price }
+                } else {
+                    self.gold -= price;
+                    d.stations[i].spent = true;
+                    self.grant(item);
+                    Interaction::Bought(item)
+                }
+            }
+            StationKind::Fountain if station.spent => Interaction::AlreadyUsed,
+            StationKind::Fountain => {
+                d.stations[i].spent = true;
+                for f in &mut self.flasks {
+                    f.refill();
+                }
+                let heal = self.player.max_hp * FOUNTAIN_HEAL;
+                self.player.heal(heal);
+                Interaction::Refilled
+            }
+            StationKind::Workbench => Interaction::OpenSpellcraft,
+        };
+        self.last_interaction = Some(result);
+    }
+
+    /// Pick up gold the alchemist touches (or that the Magnet Ring pulls in).
+    fn collect_gold(&mut self) {
+        let reach = self.mods.magnet.max(1);
+        let b = &self.player.body;
+        let (x0, y0, x1, y1) = (
+            b.x - reach,
+            b.y - reach,
+            b.x + b.w + reach,
+            b.y + b.h + reach,
+        );
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if self.world.get(x, y) == id::GOLD {
+                    self.world.set(x, y, id::EMPTY);
+                    self.gold += 1;
+                }
+            }
+        }
+    }
+
+    fn update_creatures(&mut self, playing: bool) {
         let target = playing.then(|| self.player.body.clone());
         for enemy in &mut self.enemies {
             if let Some(EnemyEvent::Hit { damage, knock_x }) =
@@ -325,14 +608,41 @@ impl Game {
                 self.player.hit(damage, knock_x);
             }
         }
+        if let Some(w) = &mut self.wyrm {
+            if let Some(EnemyEvent::Hit { damage, knock_x }) =
+                w.update(&mut self.world, target.as_ref(), &mut self.rng)
+            {
+                self.player.hit(damage, knock_x);
+            }
+        }
+    }
+
+    /// The creature (if any) occupying a point.
+    pub fn creature_at(&self, x: f32, y: f32) -> Option<Target> {
+        if let Some(i) = self
+            .enemies
+            .iter()
+            .position(|e| e.alive() && e.body.contains(x, y))
+        {
+            return Some(Target::Enemy(i));
+        }
+        self.wyrm.as_ref()?.segment_at(x, y).map(Target::Segment)
     }
 
     fn update_particles(&mut self) {
+        // Encode targets as one index for the particle: enemies first, then
+        // wyrm segments. Nothing is added or removed until after the loop.
+        let n_enemies = self.enemies.len();
         let enemies = &self.enemies;
+        let wyrm = self.wyrm.as_ref();
         let hit_test = |x: f32, y: f32| {
-            enemies
+            if let Some(i) = enemies
                 .iter()
                 .position(|e| e.alive() && e.body.contains(x, y))
+            {
+                return Some(i);
+            }
+            wyrm.and_then(|w| w.segment_at(x, y)).map(|s| n_enemies + s)
         };
         let (world, rng) = (&mut self.world, &mut self.rng);
         let mut struck = Vec::new();
@@ -346,11 +656,15 @@ impl Game {
                 }
             });
         for (i, p) in struck {
-            self.enemies[i].struck_by(&p);
+            if i < n_enemies {
+                self.enemies[i].struck_by(&p);
+            } else if let Some(w) = &mut self.wyrm {
+                w.struck_by(i - n_enemies, &p);
+            }
         }
     }
 
-    /// Blasts hurt and knock back the player and enemies.
+    /// Blasts hurt and knock back the player and every creature.
     fn apply_explosions(&mut self) {
         let blasts = self.world.take_explosions();
         if blasts.is_empty() {
@@ -373,7 +687,7 @@ impl Game {
                     (falloff, nx, ny)
                 })
             };
-            if self.player.alive() {
+            if self.player.alive() && !self.mods.blast_immune {
                 if let Some((f, nx, ny)) = push(self.player.center()) {
                     player_damage += 30.0 * f * strength;
                     self.player.vx += nx * 4.0 * f;
@@ -388,6 +702,14 @@ impl Game {
                     e.body.vy += ny * 4.0 * f - 0.5 * f;
                 }
             }
+            if let Some(w) = &mut self.wyrm {
+                for i in 0..w.segments.len() {
+                    let s = &w.segments[i];
+                    if let Some((f, _, _)) = push((s.x, s.y)) {
+                        w.damage(i, 40.0 * f * strength);
+                    }
+                }
+            }
         }
         if player_damage > 0.0 && self.phase == Phase::Playing {
             self.player
@@ -395,20 +717,63 @@ impl Game {
         }
     }
 
-    /// Remove dead enemies, leaving their remains in the world.
-    fn reap_enemies(&mut self) {
-        let world = &mut self.world;
+    /// Remove the dead, leaving remains and gold in the world.
+    fn reap_creatures(&mut self) {
         let mut killed = 0;
+        let mut drops = Vec::new();
+        let world = &mut self.world;
         self.enemies.retain(|e| {
             if e.alive() {
                 return true;
             }
             e.remains(world);
             killed += e.credited as u32;
+            let gold = match e.kind {
+                EnemyKind::Scarab => 3,
+                EnemyKind::Wraith => 2,
+                EnemyKind::Golem => 10,
+            };
+            drops.push((e.body.center(), gold));
             false
         });
+        if self.wyrm.as_ref().is_some_and(|w| !w.alive()) {
+            let w = self.wyrm.take().unwrap();
+            w.remains(&mut self.world);
+            // Its hoard spills out beneath the rift, where you'll pass.
+            let hoard = self.rift_spot.map_or((w.head().x, w.head().y), |r| {
+                let (x, _) = r.center();
+                (x as f32, (r.y + r.h + 6) as f32)
+            });
+            drops.push((hoard, 40));
+            killed += 1;
+            // The way out opens where the lair's rift was foretold.
+            self.exit = self.rift_spot;
+        }
+        for ((x, y), n) in drops {
+            self.drop_gold(x, y, n);
+        }
         if self.phase == Phase::Playing {
             self.kills += killed;
+        }
+    }
+
+    fn drop_gold(&mut self, x: f32, y: f32, n: u32) {
+        let mut placed = 0;
+        for _ in 0..n * 6 {
+            if placed == n {
+                break;
+            }
+            let gx = x as i32 + self.rng.range(0, 8) as i32 - 4;
+            let gy = y as i32 + self.rng.range(0, 8) as i32 - 4;
+            // Gold can settle into open air or loose powder (a buried
+            // creature's hoard ends up in the sand, waiting to be dug out).
+            let m = self.world.get(gx, gy);
+            let open =
+                m == id::EMPTY || physand_sim::material::kind(m) == physand_sim::Kind::Powder;
+            if open && m != id::GOLD && self.world.in_bounds(gx, gy) {
+                self.world.set(gx, gy, id::GOLD);
+                placed += 1;
+            }
         }
     }
 
@@ -434,20 +799,24 @@ impl Game {
                 });
             }
         }
-        if let Some(exit) = self.exit {
-            // The rift devours any material that falls into it, so sand
-            // pouring through the open seal can never bury the way out.
-            for y in exit.y..exit.y + exit.h {
-                for x in exit.x..exit.x + exit.w {
-                    if self.world.get(x, y) != id::EMPTY {
-                        self.world.set(x, y, id::EMPTY);
-                    }
+        let Some(exit) = self.exit else { return };
+        // The rift devours any material that falls into it, so sand pouring
+        // in can never bury the way out.
+        for y in exit.y..exit.y + exit.h {
+            for x in exit.x..exit.x + exit.w {
+                if self.world.get(x, y) != id::EMPTY {
+                    self.world.set(x, y, id::EMPTY);
                 }
             }
-            let (px, py) = self.player.center();
-            if exit.contains(px as i32, py as i32) {
-                self.phase = Phase::Cleared;
-            }
+        }
+        let (px, py) = self.player.center();
+        if !exit.contains(px as i32, py as i32) {
+            return;
+        }
+        match self.stage {
+            Stage::Floor(_) => self.phase = Phase::Cleared,
+            Stage::Distillery(_) => self.leave_distillery(),
+            Stage::Boss => self.phase = Phase::Victory,
         }
     }
 
@@ -481,8 +850,18 @@ impl Game {
                 if (x - tx).pow(2) + (y - ty).pow(2) > r * r {
                     continue;
                 }
-                let chance = props(self.world.get(x, y)).dig;
-                if chance > 0.0 && self.rng.chance(chance) && self.world.cell(x, y).is_some() {
+                let mat = self.world.get(x, y);
+                let chance = props(mat).dig;
+                if chance <= 0.0 || !self.rng.chance(chance) || self.world.cell(x, y).is_none() {
+                    continue;
+                }
+                if mat == id::GOLD {
+                    self.gold += 1;
+                    self.world.set(x, y, id::EMPTY);
+                } else if self.rng.chance(self.mods.dig_gold) {
+                    // Philosopher's Shard: the stone turns to gold as you dig.
+                    self.world.set(x, y, id::GOLD);
+                } else {
                     self.world.set(x, y, id::EMPTY);
                 }
             }
@@ -514,8 +893,12 @@ impl Game {
         self.cam_y += (ty - self.cam_y) * CAMERA_LERP;
     }
 
-    /// Where the compass points: the seal until it is open, then the exit.
+    /// Where the compass points: the seal until it is open, then the exit;
+    /// in the lair, the wyrm until it falls.
     pub fn objective(&self) -> Option<(f32, f32)> {
+        if let Some(w) = &self.wyrm {
+            return Some((w.head().x, w.head().y));
+        }
         let r = if self.seal_open {
             self.exit?
         } else {
@@ -524,6 +907,10 @@ impl Game {
         let (x, y) = r.center();
         Some((x as f32, y as f32))
     }
+
+    // ---------------------------------------------------------------------
+    // Rendering
+    // ---------------------------------------------------------------------
 
     /// Compose the visible window: cells into `view_cells`, sprites into `overlay`.
     pub fn render(&mut self) {
@@ -541,6 +928,7 @@ impl Game {
         let dig_ring = (playing && self.input.dig)
             .then(|| self.dig_target(self.input.aim_x, self.input.aim_y));
         let objective = self.objective();
+        let here = self.station_here();
         let tick = self.world.tick_count();
         let mut o = Overlay {
             buf: &mut self.overlay,
@@ -552,6 +940,25 @@ impl Game {
         if let Some(exit) = self.exit {
             let (ex, ey) = exit.center();
             o.portal(ex - cx, ey - cy, exit.w / 2 + 2, exit.h / 2, tick);
+        }
+
+        // Distillery stations.
+        if let Some(d) = &self.distillery {
+            for (i, s) in d.stations.iter().enumerate() {
+                let (sx, _) = s.zone.center();
+                let bob = ((tick as f32 * 0.08 + i as f32).sin() * 1.5) as i32;
+                let (x, y) = (sx - cx, s.zone.y + 4 + bob - cy);
+                match s.kind {
+                    StationKind::Reward(item) | StationKind::Shop(item) if !s.spent => {
+                        o.icon(x, y, item, here == Some(i));
+                    }
+                    StationKind::Fountain if !s.spent => {
+                        o.sparkle(x, y + 8, [140, 200, 255, 230], tick)
+                    }
+                    StationKind::Workbench => o.sparkle(x, y + 6, [255, 210, 120, 200], tick),
+                    _ => {}
+                }
+            }
         }
 
         for e in &self.enemies {
@@ -590,6 +997,47 @@ impl Game {
                 }
                 EnemyKind::Golem => {
                     o.sprite(x, y, &render::GOLEM, render::golem_palette, e.facing, tint)
+                }
+            }
+        }
+
+        if let Some(w) = &self.wyrm {
+            // Tail first so the head draws on top.
+            for (i, s) in w.segments.iter().enumerate().rev() {
+                let r = if i == 0 { HEAD_RADIUS } else { SEGMENT_RADIUS } as i32;
+                let base = if s.glassed {
+                    [175, 215, 225, 235]
+                } else {
+                    [206, 170, 104, 255]
+                };
+                let heat = (s.heat / crate::wyrm::GLASS_HEAT).min(1.0);
+                let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * heat * 0.7) as u8;
+                let mut c = [
+                    mix(base[0], 255),
+                    mix(base[1], 110),
+                    mix(base[2], 30),
+                    base[3],
+                ];
+                if s.hurt_flash > 0 {
+                    c = [255, 255, 255, 255];
+                }
+                let (x, y) = (s.x as i32 - cx, s.y as i32 - cy);
+                o.disc(x, y, r, c, [90, 66, 40, 255]);
+                if i == 0 {
+                    // Eyes and mandibles, facing the direction of travel.
+                    let next = w.segments.get(1).map_or((s.x + 1.0, s.y), |n| (n.x, n.y));
+                    let (dx, dy) = (s.x - next.0, s.y - next.1);
+                    let d = (dx * dx + dy * dy).sqrt().max(0.01);
+                    let (ux, uy) = (dx / d, dy / d);
+                    let eye = [255, 60, 30, 255];
+                    for side in [-1.0, 1.0] {
+                        let ex = x as f32 + ux * 2.0 - uy * side * 2.0;
+                        let ey = y as f32 + uy * 2.0 + ux * side * 2.0;
+                        o.put(ex.round() as i32, ey.round() as i32, eye);
+                        let mx = x as f32 + ux * 6.0 - uy * side * 3.0;
+                        let my = y as f32 + uy * 6.0 + ux * side * 3.0;
+                        o.put(mx.round() as i32, my.round() as i32, [60, 40, 24, 255]);
+                    }
                 }
             }
         }
@@ -669,7 +1117,8 @@ impl Game {
     }
 
     /// Reconfigure a flask from wasm-friendly codes (`255` = empty slot).
-    /// Returns `false` if the recipe is invalid.
+    /// Returns `false` if the recipe is invalid, uses components you don't
+    /// own, or you are not at a workbench.
     pub fn configure_flask(
         &mut self,
         index: usize,
@@ -677,21 +1126,26 @@ impl Game {
         form: u8,
         catalysts: &[u8],
     ) -> bool {
-        use crate::spell::Form;
-        let Some(flask) = self.flasks.get_mut(index) else {
+        if !self.can_edit_flasks() {
             return false;
-        };
+        }
         let reagents: Vec<u8> = reagents.iter().copied().filter(|&r| r != 255).collect();
         let Some(&form) = Form::ALL.get(form as usize) else {
             return false;
         };
-        let catalysts: Option<Vec<Catalyst>> = catalysts
+        let Some(catalysts) = catalysts
             .iter()
             .filter(|&&c| c != 255)
             .map(|&c| Catalyst::ALL.get(c as usize).copied())
-            .collect();
-        match catalysts {
-            Some(cats) => flask.configure(&reagents, form, &cats).is_ok(),
+            .collect::<Option<Vec<Catalyst>>>()
+        else {
+            return false;
+        };
+        if !self.inventory.allows(&reagents, form, &catalysts) {
+            return false;
+        }
+        match self.flasks.get_mut(index) {
+            Some(flask) => flask.configure(&reagents, form, &catalysts).is_ok(),
             None => false,
         }
     }

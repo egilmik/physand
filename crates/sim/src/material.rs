@@ -23,6 +23,7 @@ pub mod id {
     pub const GLASS: u8 = 14;
     pub const SANDSTONE: u8 = 15;
     pub const WAX: u8 = 16;
+    pub const GOLD: u8 = 17;
 }
 
 /// Temperature of the cave air. Temperatures are abstract `u8` units:
@@ -105,7 +106,7 @@ const BASE: Props = Props {
     reagent: false,
 };
 
-pub const MATERIALS: [Props; 17] = [
+pub const MATERIALS: [Props; 18] = [
     Props {
         name: "Empty",
         kind: Kind::Empty,
@@ -274,6 +275,16 @@ pub const MATERIALS: [Props; 17] = [
         air_cool: 0.1,
         // Molten wax is plain, cool oil: it only burns if you bring fire.
         on_hot: Some((100, Outcome::BecomeFresh(id::OIL))),
+        ..BASE
+    },
+    // Loose gold dust: heavy enough to sink through any liquid (lava
+    // included, where it is lost). The alchemist collects it by touch.
+    Props {
+        name: "Gold",
+        kind: Kind::Powder,
+        density: 120,
+        color: [255, 204, 64],
+        dig: 0.6,
         ..BASE
     },
 ];

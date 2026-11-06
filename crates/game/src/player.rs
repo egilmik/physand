@@ -38,6 +38,12 @@ pub struct Player {
     pub facing: i32,
     pub hp: f32,
     pub stamina: f32,
+    /// Maximum health and stamina (relics raise them).
+    pub max_hp: f32,
+    pub max_stamina: f32,
+    /// Damage multipliers for fire and acid (relics lower them).
+    pub fire_damage: f32,
+    pub acid_damage: f32,
     /// Ticks left showing the damage flash.
     pub hurt_flash: u8,
     /// Ticks of immunity to enemy contact damage.
@@ -67,6 +73,10 @@ impl Player {
             facing: 1,
             hp: MAX_HP,
             stamina: MAX_STAMINA,
+            max_hp: MAX_HP,
+            max_stamina: MAX_STAMINA,
+            fire_damage: 1.0,
+            acid_damage: 1.0,
             hurt_flash: 0,
             invuln: 0,
             coyote: 0,
@@ -115,7 +125,7 @@ impl Player {
         // --- Vertical: jump, levitate, swim, gravity ------------------------
         if grounded {
             self.coyote = COYOTE_TICKS;
-            self.stamina = (self.stamina + STAMINA_REGEN).min(MAX_STAMINA);
+            self.stamina = (self.stamina + STAMINA_REGEN).min(self.max_stamina);
         } else {
             self.coyote = self.coyote.saturating_sub(1);
         }
@@ -153,9 +163,9 @@ impl Player {
         // --- Hazards ---------------------------------------------------------
         // Fire hurts but leaves time to escape; lava is nearly instant death.
         let c = self.body.contact(world);
-        let dmg = ((c.fire as f32 * 0.03).min(0.6)
+        let dmg = ((c.fire as f32 * 0.03).min(0.6) * self.fire_damage
             + c.lava as f32 * 0.5
-            + (c.acid as f32 * 0.1).min(1.0)
+            + (c.acid as f32 * 0.1).min(1.0) * self.acid_damage
             + (c.hot as f32 * 0.02).min(0.4))
         .min(4.0);
         if dmg > 0.0 {
@@ -187,6 +197,19 @@ impl Player {
     }
 
     pub fn heal(&mut self, amount: f32) {
-        self.hp = (self.hp + amount).min(MAX_HP);
+        self.hp = (self.hp + amount).min(self.max_hp);
+    }
+
+    /// Apply relic modifiers. Raising the maximum also grants the difference.
+    pub fn apply(&mut self, m: &crate::run::Modifiers) {
+        let max_hp = MAX_HP + m.bonus_hp;
+        if max_hp > self.max_hp {
+            self.hp += max_hp - self.max_hp;
+        }
+        self.max_hp = max_hp;
+        self.hp = self.hp.min(max_hp);
+        self.max_stamina = MAX_STAMINA * m.stamina;
+        self.fire_damage = m.fire_damage;
+        self.acid_damage = m.acid_damage;
     }
 }

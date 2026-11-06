@@ -6,18 +6,48 @@ Rust → WebAssembly simulation, WebGL2 rendering.
 
 See [docs/CONCEPT.md](docs/CONCEPT.md) for the game concept and roadmap.
 
-## Status: M3 — first playable floor
+## Status: M4 — a complete run
 
-Descend through the **Dune Catacombs** as the alchemist. Each floor is
-generated from a seed: a winding route links sandstone burial rooms full of
-dunes, oil pools and *sand traps* (sand held up by wooden beams — burn or dig
-them and it all comes down), with a lava lake at the bottom. Somewhere below
-lies an obsidian vault whose shaft is closed by an **ancient wax seal**.
-Nothing breaks wax — not digging, acid, explosions or transmutation — but heat
-melts it into oil. Melt a way through, drop into the rift, and descend to a
-harder floor. An arrow at the screen edge points to the seal, then the rift.
+A run is **Floor 1 → Distillery → Floor 2 → Distillery → Floor 3 →
+Distillery → the Sandwyrm's lair**. Death is permanent: the run ends and you
+start again on a fresh floor 1. Slay the Sandwyrm and take its rift to win.
 
-Death is permanent: the run ends and you start again on a fresh floor 1.
+**Floors.** Each floor of the **Dune Catacombs** is generated from a seed: a
+winding route links sandstone burial rooms full of dunes, oil pools and *sand
+traps* (sand held up by wooden beams — burn or dig them and it all comes
+down), with a lava lake at the bottom. Somewhere below lies an obsidian vault
+whose shaft is closed by an **ancient wax seal**. Nothing breaks wax — not
+digging, acid, explosions or transmutation — but heat melts it into oil. Melt
+a way through and drop into the rift. An arrow at the screen edge points to
+the seal, then the rift. **Gold** dust lies on cave floors, is sealed in the
+walls, and spills from slain creatures; walk over it (or dig it) to collect it.
+
+**The Distillery** is a safe room between floors. Walk up to a station and
+press `E`:
+- **Three pedestals** — take one reward (a new reagent, form, catalyst or
+  relic); the other two vanish.
+- **Shop** — a healing draught (30g), bigger flasks (50g), and one more
+  component or relic (60–90g).
+- **Fountain** — refills every flask and restores a quarter of your health, once.
+- **Workbench** — the only place you can rework flasks in Spellcraft.
+- **The rift** — on to the next floor (or, after floor 3, the boss).
+
+You start with Water/Oil/Sand, the Spray/Orb/Wall forms and the Heat catalyst;
+everything else is found or bought.
+
+**Relics** bend the rules for the rest of the run: Ember Ward (fire barely
+burns), Glass Skin (acid barely hurts), Scarab Carapace (+25 max HP),
+Levitation Charm (+60% levitation), Bottomless Flask (+50% flask refill),
+Volatile Heart (explosions can't hurt you), Philosopher's Shard (digging
+sometimes makes gold), Magnet Ring (gold flies to you).
+
+**The Sandwyrm** swims through the dunes of its lair, a chain of packed-sand
+segments that stalks beneath you and bursts out to lunge. It moves the sand
+rather than deleting it, and grinds rock into sand. Water erodes its segments;
+heat glazes them into brittle glass that takes triple damage and shatters
+under explosions; every destroyed segment spills real sand or glass. Its head
+is armoured until the body has been whittled down to six segments. Its hoard
+spills out beneath the rift it opens.
 
 ### Creatures
 
@@ -46,8 +76,8 @@ barrier), *Searing Oil Orb* (napalm), *Frozen Water Wall* (ice bridge), *Frost
 Orb* on lava (obsidian), *Volatile Water Orb* (digging bomb), *Searing
 Gunpowder Orb* (big bomb), *Transmuting Sand Orb* (turn rock into sand),
 *Acid Rain* (eat through ceilings). Names are generated from the recipe.
-Open the **Spellcraft** panel (`C`) to edit flasks. In later milestones
-reagents and catalysts become loot.
+Rework flasks in the **Spellcraft** panel at a Distillery workbench, using only
+the components you own.
 
 ### Chemistry
 
@@ -76,11 +106,12 @@ and knock back the player. Hot cells glow and frozen cells frost over.
 | Rock / Obsidian | Static insulating solids (rock is slowly diggable, obsidian immune to spells) |
 | Sandstone | Catacomb masonry: diggable, eaten by acid |
 | Wax | Floor seals: immune to everything except heat, which melts it into oil |
+| Gold | Heavy dust that sinks through liquids (lost in lava); collected by touch |
 
 **Controls:** `A`/`D` move · `W`/`Space` jump (hold to levitate or swim) ·
 left click cast · right click dig · `1`–`4` or mouse wheel select flask ·
-`C` spellcraft · `Enter` descend after clearing a floor · `R` new run ·
-`Tab` brush mode · `P` pause.
+`E` use a Distillery station · `C` spellcraft (at a workbench) · `Enter`
+continue after a floor / start over · `R` new run · `Tab` brush mode · `P` pause.
 In brush mode: left paint, right erase, wheel or `[` `]` brush size, number keys pick material.
 Add `?seed=123` to the URL to replay a run's first floor.
 
@@ -112,8 +143,9 @@ unoptimised build) and reload the page. `npm run build` produces a static site i
 
 ```
 crates/sim/   Simulation core: materials, chunked cell grid, reactions, worldgen (pure Rust, unit-tested)
-crates/game/  Gameplay: run/floor flow, player and enemies (shared body physics), spells,
-              camera, frame composition (unit-tested)
+crates/game/  Gameplay: run flow (floors, Distillery, boss), inventory/relics/gold, player,
+              enemies and the Sandwyrm (shared body physics), spells, camera,
+              frame composition (unit-tested)
 crates/web/   wasm-bindgen glue exposing the game to JS
 web/          Vite + TypeScript front end: game loop, input, WebGL2 renderer, UI
 scripts/      Build helpers
@@ -121,7 +153,7 @@ docs/         Design documents
 ```
 
 Each frame Rust copies the visible 480×270 window of the grid (4 bytes per cell:
-`[material, colour variation, lifetime, tick stamp]`) plus an RGBA overlay of
+`[material, colour variation, lifetime, temperature]`) plus an RGBA overlay of
 sprites and particles into buffers that JS uploads straight from wasm memory to
 two GPU textures; colouring and compositing happen in the fragment shader.
 

@@ -1,6 +1,6 @@
 use physand_sim::{id, worldgen::Level, World};
 
-use crate::game::{Game, Phase};
+use crate::game::{Game, Phase, Stage};
 use crate::input::Input;
 use crate::player::{Player, PLAYER_H};
 
@@ -332,7 +332,7 @@ fn starter_flasks_have_generated_names_and_costs() {
             "Water Spray",
             "Searing Oil Orb",
             "Searing Sand Wall",
-            "Acid Rain"
+            "Sand Spray"
         ]
     );
     assert!((g.flasks[1].cost() - 39.0).abs() < 1e-3);
@@ -472,6 +472,8 @@ fn transmute_orb_converts_what_it_hits() {
 #[test]
 fn rain_falls_from_the_ceiling() {
     let mut g = arena();
+    let rain = Form::ALL.iter().position(|&f| f == Form::Rain).unwrap() as u8;
+    assert!(g.configure_flask(3, &[id::ACID, NONE, NONE], rain, &[NONE, NONE]));
     g.select_flask(3);
     cast_at(&mut g, 150.0, 95.0, 2);
     // Droplets start just under the ceiling (y=40), far above the aim point.
@@ -749,7 +751,7 @@ fn melting_the_seal_opens_it_and_reaching_the_exit_clears_the_floor() {
 }
 
 #[test]
-fn a_real_floor_is_populated_and_descending_builds_the_next() {
+fn a_real_floor_is_populated_and_leads_to_the_distillery() {
     let mut g = Game::new(2024);
     assert_eq!(g.depth, 1);
     let n = g.enemies_alive();
@@ -773,8 +775,481 @@ fn a_real_floor_is_populated_and_descending_builds_the_next() {
     g.phase = Phase::Cleared;
     g.player.hp = 50.0;
     assert!(g.descend());
-    assert_eq!(g.depth, 2);
+    assert_eq!(g.stage, Stage::Distillery(1));
     assert_eq!(g.phase, Phase::Playing);
-    assert_eq!(g.player.hp, 80.0, "descending heals a little");
+    assert_eq!(g.player.hp, 50.0, "health carries over; the fountain heals");
+    assert_eq!(g.enemies_alive(), 0, "the Distillery is safe");
+
+    // Through the Distillery's rift to floor 2, which is busier.
+    walk_into_exit(&mut g);
+    assert_eq!(g.stage, Stage::Floor(2));
+    assert_eq!(g.depth, 2);
     assert!(g.enemies_alive() > n, "deeper floors are busier");
+}
+
+/// Teleport the player into the current exit and step once.
+fn walk_into_exit(g: &mut Game) {
+    let (ex, ey) = g.exit().expect("an exit").center();
+    g.player.body = crate::body::Body::standing(ex, ey + 4, 5, 11);
+    hold(g, idle(), 1);
+}
+
+// ---- M4: run structure, Distillery, relics, gold, Sandwyrm ----------------------
+
+use crate::distillery::{Interaction, StationKind};
+use crate::run::{roll_items, Inventory, Item, Relic};
+use crate::wyrm::{GLASS_HEAT, SEGMENTS, SEGMENT_HP};
+use physand_sim::rng::Rng;
+
+/// A real (non-sandbox) run, fast-forwarded into the first Distillery.
+fn in_distillery(seed: u32) -> Game {
+    let mut g = Game::new(seed);
+    g.debug_clear_floor();
+    hold(&mut g, idle(), 1);
+    assert!(g.descend());
+    assert_eq!(g.stage, Stage::Distillery(1));
+    g
+}
+
+/// Stand at the first station of a kind.
+fn stand_at(g: &mut Game, want: impl Fn(&StationKind) -> bool) {
+    let zone = g
+        .distillery()
+        .unwrap()
+        .stations
+        .iter()
+        .find(|s| want(&s.kind))
+        .unwrap()
+        .zone;
+    let (cx, _) = zone.center();
+    g.player.body = crate::body::Body::standing(cx, zone.y + zone.h - 2, 5, 11);
+    hold(g, idle(), 3);
+}
+
+fn press_interact(g: &mut Game) {
+    hold(
+        g,
+        Input {
+            interact: true,
+            ..idle()
+        },
+        1,
+    );
+    hold(g, idle(), 1);
+}
+
+#[test]
+fn reward_rolls_are_distinct_unowned_and_seeded() {
+    let inv = Inventory::starter();
+    let a = roll_items(&inv, &mut Rng::new(5), 3, &[]);
+    let b = roll_items(&inv, &mut Rng::new(5), 3, &[]);
+    assert_eq!(a, b, "same seed, same rewards");
+    assert_eq!(a.len(), 3);
+    for (i, item) in a.iter().enumerate() {
+        assert!(!inv.owns(*item), "{item:?} already owned");
+        assert!(!a[..i].contains(item), "duplicate {item:?}");
+    }
+    // An inventory that owns everything gets consumables instead.
+    let mut all = Inventory::everything();
+    for r in Relic::ALL {
+        all.add(Item::Relic(r));
+    }
+    let filler = roll_items(&all, &mut Rng::new(1), 3, &[]);
+    assert!(filler
+        .iter()
+        .all(|i| matches!(i, Item::Heal | Item::Capacity)));
+}
+
+#[test]
+fn flasks_are_edited_only_at_the_workbench_with_owned_components() {
+    let mut g = Game::new(11);
+    assert!(!g.sandbox);
+    assert!(!g.can_edit_flasks());
+    assert!(
+        !g.configure_flask(0, &[id::WATER, NONE, NONE], 1, &[NONE, NONE]),
+        "not on a floor"
+    );
+
+    let mut g = in_distillery(11);
+    stand_at(&mut g, |k| *k == StationKind::Workbench);
+    assert!(g.can_edit_flasks());
+    press_interact(&mut g);
+    assert_eq!(g.last_interaction, Some(Interaction::OpenSpellcraft));
+    let frost = Catalyst::ALL
+        .iter()
+        .position(|&c| c == Catalyst::Frost)
+        .unwrap() as u8;
+    let heat = Catalyst::ALL
+        .iter()
+        .position(|&c| c == Catalyst::Heat)
+        .unwrap() as u8;
+    assert!(
+        !g.configure_flask(0, &[id::ACID, NONE, NONE], 0, &[NONE, NONE]),
+        "acid not owned"
+    );
+    assert!(
+        !g.configure_flask(0, &[id::WATER, NONE, NONE], 0, &[frost, NONE]),
+        "frost not owned"
+    );
+    assert!(g.configure_flask(0, &[id::OIL, id::SAND, NONE], 0, &[heat, NONE]));
+    assert_eq!(g.flasks[0].name(), "Searing Oil-Sand Spray");
+}
+
+#[test]
+fn taking_a_reward_makes_the_others_vanish() {
+    let mut g = in_distillery(12);
+    let owned_before = g.inventory.clone();
+    stand_at(&mut g, |k| matches!(k, StationKind::Reward(_)));
+    let prompt = g.interact_prompt().expect("a prompt at the pedestal");
+    assert!(prompt.title.starts_with("Take "));
+    press_interact(&mut g);
+    let Some(Interaction::Took(item)) = g.last_interaction else {
+        panic!("expected to take a reward, got {:?}", g.last_interaction)
+    };
+    assert!(g.inventory.owns(item) && !owned_before.owns(item));
+    let d = g.distillery().unwrap();
+    assert!(d
+        .stations
+        .iter()
+        .filter(|s| matches!(s.kind, StationKind::Reward(_)))
+        .all(|s| s.spent));
+}
+
+#[test]
+fn shop_needs_gold() {
+    let mut g = in_distillery(13);
+    stand_at(&mut g, |k| *k == StationKind::Shop(Item::Heal));
+    g.player.hp = 40.0;
+    press_interact(&mut g);
+    assert_eq!(g.last_interaction, Some(Interaction::TooPoor { price: 30 }));
+    assert_eq!(g.player.hp, 40.0);
+    g.gold = 45;
+    press_interact(&mut g);
+    assert_eq!(g.last_interaction, Some(Interaction::Bought(Item::Heal)));
+    assert_eq!(g.gold, 15);
+    assert_eq!(g.player.hp, 80.0);
+    // Sold out.
+    assert!(g.interact_prompt().is_none());
+}
+
+#[test]
+fn fountain_refills_once() {
+    let mut g = in_distillery(14);
+    g.flasks[0].volume = 0.0;
+    g.player.hp = 50.0;
+    stand_at(&mut g, |k| *k == StationKind::Fountain);
+    press_interact(&mut g);
+    assert_eq!(g.last_interaction, Some(Interaction::Refilled));
+    assert!(g.flasks[0].volume >= g.flasks[0].capacity - 1.0);
+    assert_eq!(g.player.hp, 75.0);
+    press_interact(&mut g);
+    assert_eq!(g.last_interaction, Some(Interaction::AlreadyUsed));
+    assert_eq!(g.player.hp, 75.0);
+}
+
+#[test]
+fn gold_is_collected_by_touch_digging_and_from_the_dead() {
+    let mut g = den();
+    let (px, py) = (g.player.x, g.player.y);
+    for x in px - 2..px + 7 {
+        g.world.set(x, py + 4, id::GOLD);
+    }
+    settle(&mut g, 30);
+    assert!(g.gold >= 5, "touched gold: {}", g.gold);
+
+    // Digging gold credits it directly.
+    let gold = g.gold;
+    for x in 60..66 {
+        for y in 96..100 {
+            g.world.set(x, y, id::GOLD);
+        }
+    }
+    hold(
+        &mut g,
+        Input {
+            dig: true,
+            aim_x: 62.0,
+            aim_y: 98.0,
+            ..idle()
+        },
+        40,
+    );
+    assert!(g.gold > gold + 10);
+
+    // Slain creatures drop gold dust.
+    g.add_enemy(EnemyKind::Golem, 200, 99);
+    g.enemies[0].damage(1000.0);
+    settle(&mut g, 2);
+    assert!(g.world.count(id::GOLD) >= 8, "golem dropped gold");
+}
+
+#[test]
+fn relics_change_the_rules() {
+    // Scarab Carapace raises maximum health (and fills the new space).
+    let mut g = den();
+    g.grant(Item::Relic(Relic::ScarabCarapace));
+    assert_eq!(g.player.max_hp, 125.0);
+    assert_eq!(g.player.hp, 125.0);
+
+    // Ember Ward: standing in fire hurts far less.
+    let burn = |ward: bool| {
+        let mut g = den();
+        if ward {
+            g.grant(Item::Relic(Relic::EmberWard));
+        }
+        for _ in 0..30 {
+            let (x, y) = (g.player.x, g.player.y);
+            for dy in 0..11 {
+                g.world.set(x - 1, y + dy, id::FIRE);
+                g.world.set(x + 5, y + dy, id::FIRE);
+            }
+            hold(&mut g, idle(), 1);
+        }
+        100.0 - g.player.hp
+    };
+    let (plain, warded) = (burn(false), burn(true));
+    assert!(
+        plain > 5.0 && warded < plain * 0.5,
+        "plain {plain}, warded {warded}"
+    );
+
+    // Volatile Heart: explosions can't hurt you.
+    let mut g = den();
+    g.grant(Item::Relic(Relic::VolatileHeart));
+    let (cx, cy) = g.player.center();
+    g.world.explode(cx as i32, cy as i32 + 8, 7);
+    settle(&mut g, 2);
+    // (The blast's stray flames may singe a little; the blast itself can't.)
+    assert!(g.player.hp > 97.0, "hp {}", g.player.hp);
+
+    // Philosopher's Shard: digging turns some stone to gold.
+    let mut g = den();
+    g.grant(Item::Relic(Relic::PhilosophersShard));
+    for x in 50..80 {
+        for y in 60..100 {
+            g.world.set(x, y, id::SAND);
+        }
+    }
+    for t in 0..240 {
+        let y = 70.0 + (t % 30) as f32;
+        hold(
+            &mut g,
+            Input {
+                dig: true,
+                aim_x: 55.0,
+                aim_y: y,
+                ..idle()
+            },
+            1,
+        );
+    }
+    assert!(
+        g.gold + g.world.count(id::GOLD) as u32 > 3,
+        "the shard made gold"
+    );
+
+    // Magnet Ring: gold flies in from a distance.
+    let mut g = den();
+    g.grant(Item::Relic(Relic::MagnetRing));
+    let (px, py) = (g.player.x, g.player.y);
+    g.world.set(px + 12, py + 5, id::GOLD);
+    hold(&mut g, idle(), 1);
+    assert_eq!(g.gold, 1);
+}
+
+#[test]
+fn after_three_floors_the_boss_awaits() {
+    let mut g = in_distillery(15);
+    walk_into_exit(&mut g);
+    assert_eq!(g.stage, Stage::Floor(2));
+    g.debug_clear_floor();
+    hold(&mut g, idle(), 1);
+    assert!(g.descend());
+    walk_into_exit(&mut g);
+    assert_eq!(g.stage, Stage::Floor(3));
+    g.debug_clear_floor();
+    hold(&mut g, idle(), 1);
+    assert!(g.descend());
+    assert_eq!(g.stage, Stage::Distillery(3));
+    walk_into_exit(&mut g);
+    assert_eq!(g.stage, Stage::Boss);
+    assert!(g.wyrm.is_some());
+    assert!(g.exit().is_none(), "no way out until the wyrm falls");
+    assert!(g.boss_health().is_some());
+}
+
+/// A sandbox pit: sand from y=120 down, rock below 180, obsidian walls.
+fn sand_pit() -> Game {
+    let mut world = World::new(320, 200, 4);
+    for x in 0..320 {
+        for y in 120..200 {
+            world.set(x, y, if y >= 180 { id::ROCK } else { id::SAND });
+        }
+    }
+    for y in 0..200 {
+        for x in [0, 1, 2, 317, 318, 319] {
+            world.set(x, y, id::OBSIDIAN);
+        }
+    }
+    for x in 10..40 {
+        world.set(x, 60, id::ROCK);
+    }
+    let mut g = game_in(world, (25, 59));
+    hold(&mut g, idle(), 2);
+    g
+}
+
+#[test]
+fn wyrm_swims_through_sand_and_rock_but_not_obsidian() {
+    let mut g = sand_pit();
+    g.spawn_wyrm(200.0, 150.0);
+    let obsidian = g.world.count(id::OBSIDIAN);
+    let sand = g.world.count(id::SAND);
+    let rock = g.world.count(id::ROCK);
+    let start = (
+        g.wyrm.as_ref().unwrap().head().x,
+        g.wyrm.as_ref().unwrap().head().y,
+    );
+    let mut farthest: f32 = 0.0;
+    for _ in 0..400 {
+        settle(&mut g, 1);
+        let h = g.wyrm.as_ref().unwrap().head();
+        farthest = farthest.max((h.x - start.0).hypot(h.y - start.1));
+    }
+    assert!(farthest > 30.0, "the wyrm roams ({farthest})");
+    assert_eq!(
+        g.world.count(id::OBSIDIAN),
+        obsidian,
+        "obsidian is untouched"
+    );
+    // Sand is pushed around, never deleted; rock it grinds becomes sand.
+    let ground = rock - g.world.count(id::ROCK);
+    assert_eq!(
+        g.world.count(id::SAND),
+        sand + ground,
+        "material is conserved"
+    );
+}
+
+#[test]
+fn wyrm_weaknesses_water_heat_and_glass() {
+    let mut g = sand_pit();
+    g.spawn_wyrm(200.0, 150.0);
+    let w = g.wyrm.as_mut().unwrap();
+
+    // Armoured head while the body is long.
+    let hp = w.segments[0].hp;
+    w.damage(0, 40.0);
+    assert_eq!(w.segments[0].hp, hp - 10.0);
+
+    // Water erodes sand segments; glass is immune to erosion but brittle.
+    w.erode(3, 5.0);
+    assert_eq!(w.segments[3].hp, SEGMENT_HP - 5.0);
+    w.heat(4, GLASS_HEAT + 1.0);
+    assert!(w.segments[4].glassed);
+    w.erode(4, 5.0);
+    assert_eq!(w.segments[4].hp, SEGMENT_HP, "glass doesn't erode");
+    w.damage(4, 5.0);
+    assert_eq!(
+        w.segments[4].hp,
+        SEGMENT_HP - 15.0,
+        "glass takes triple damage"
+    );
+
+    // An explosion shatters glassed segments, spilling glass.
+    let glass = g.world.count(id::GLASS);
+    let n = g.wyrm.as_ref().unwrap().segments.len();
+    for i in 1..n {
+        g.wyrm.as_mut().unwrap().heat(i, GLASS_HEAT + 1.0);
+    }
+    let (sx, sy) = {
+        let s = &g.wyrm.as_ref().unwrap().segments[8];
+        (s.x as i32, s.y as i32)
+    };
+    g.world.explode(sx, sy, 7);
+    hold(&mut g, idle(), 2);
+    let w = g.wyrm.as_ref().unwrap();
+    assert!(w.segments.len() < SEGMENTS, "segments shattered");
+    assert!(g.world.count(id::GLASS) > glass, "they spilled glass");
+
+    // Once short, the head takes full damage.
+    let w = g.wyrm.as_mut().unwrap();
+    w.segments.truncate(5);
+    let hp = w.segments[0].hp;
+    w.damage(0, 40.0);
+    assert_eq!(w.segments[0].hp, hp - 40.0);
+}
+
+#[test]
+fn spells_hit_the_wyrm() {
+    // Out in the open, right next to the player, so the spray can reach it.
+    let mut g = den();
+    let (px, py) = g.player.center();
+    g.spawn_wyrm(px + 20.0, py - 4.0);
+    // Water spray at a body segment erodes it (re-aiming as it moves).
+    let before = g.boss_health().unwrap().0;
+    for _ in 0..40 {
+        let Some(w) = g.wyrm.as_ref() else { break };
+        let s = &w.segments[w.segments.len() / 2];
+        let (x, y) = (s.x, s.y);
+        cast_at(&mut g, x, y, 1);
+    }
+    settle(&mut g, 20);
+    if let Some((hp, _)) = g.boss_health() {
+        assert!(hp < before, "the spray hurt the wyrm ({before} -> {hp})");
+    }
+}
+
+#[test]
+fn slaying_the_wyrm_opens_the_rift_to_victory() {
+    let mut g = Game::new(16);
+    g.debug_skip_to_boss();
+    assert_eq!(g.stage, Stage::Boss);
+    let kills = g.kills;
+    g.debug_slay_boss();
+    hold(&mut g, idle(), 1);
+    assert!(g.wyrm.is_none());
+    assert_eq!(g.kills, kills + 1);
+    assert!(g.exit().is_some(), "the rift opened");
+    assert!(g.world.count(id::GOLD) > 0, "the wyrm dropped a hoard");
+    walk_into_exit(&mut g);
+    assert_eq!(g.phase, Phase::Victory);
+}
+
+#[test]
+fn a_whole_run_from_floor_one_to_victory() {
+    let mut g = Game::new(17);
+    let owned = |g: &Game| {
+        g.inventory.reagents.len()
+            + g.inventory.forms.len()
+            + g.inventory.catalysts.len()
+            + g.inventory.relics.len()
+    };
+    let start = owned(&g);
+    for floor in 1..=3 {
+        assert_eq!(g.stage, Stage::Floor(floor));
+        g.debug_clear_floor();
+        hold(&mut g, idle(), 1);
+        assert!(g.descend());
+        stand_at(&mut g, |k| matches!(k, StationKind::Reward(_)));
+        press_interact(&mut g);
+        assert!(matches!(g.last_interaction, Some(Interaction::Took(_))));
+        walk_into_exit(&mut g);
+    }
+    assert_eq!(g.stage, Stage::Boss);
+    assert_eq!(owned(&g), start + 3, "one reward per Distillery");
+    g.debug_slay_boss();
+    hold(&mut g, idle(), 1);
+    walk_into_exit(&mut g);
+    assert_eq!(g.phase, Phase::Victory);
+    // Victory is final: input no longer advances the run.
+    hold(
+        &mut g,
+        Input {
+            right: true,
+            ..idle()
+        },
+        30,
+    );
+    assert_eq!(g.phase, Phase::Victory);
 }

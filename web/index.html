@@ -16,17 +16,25 @@
             <div class="bar" id="stamina-bar"><span class="fill"></span><span class="label">Levitation</span></div>
             <div id="flasks" role="radiogroup" aria-label="Flasks"></div>
             <div id="flask-name"></div>
+            <div id="relics" aria-label="Relics"></div>
           </div>
           <div id="run-info" aria-live="polite">
             <div id="run-stats"></div>
+            <div id="gold"></div>
             <div id="objective"></div>
           </div>
+          <div class="bar" id="boss-bar" hidden><span class="fill"></span><span class="label">The Sandwyrm</span></div>
+          <div id="prompt" hidden>
+            <div id="prompt-title"></div>
+            <div id="prompt-detail"></div>
+          </div>
+          <div id="toast" hidden role="status"></div>
           <section id="spellcraft" hidden aria-label="Spellcraft">
             <header>
               <h2>Spellcraft</h2>
               <button type="button" id="spellcraft-close" aria-label="Close">×</button>
             </header>
-            <p class="hint">Combine 1–3 reagents, a form and up to 2 catalysts. The simulation does the rest.</p>
+            <p class="hint">Combine 1–3 reagents, a form and up to 2 catalysts from what you own. Find more as rewards and in shops.</p>
             <div id="recipes"></div>
           </section>
           <div id="banner" hidden role="dialog" aria-modal="false">
@@ -51,7 +59,7 @@
           <button id="spellcraft-open" type="button" title="Edit flasks (C)">Spellcraft</button>
         </div>
         <div id="stats"></div>
-        <p id="help">A/D move · W/Space jump, hold to levitate or swim · Left click cast · Right click dig · 1–4 / wheel flask · C spellcraft · Tab brush mode · P pause · Find the wax seal at the bottom and melt it to descend</p>
+        <p id="help">A/D move · W/Space jump, hold to levitate or swim · Left click cast · Right click dig · 1–4 / wheel flask · E use · C spellcraft (at a workbench) · Tab brush mode · P pause · Melt each floor's wax seal, survive three floors, slay the Sandwyrm</p>
       </aside>
     </main>
     <script type="module" src="/src/main.ts"></script>

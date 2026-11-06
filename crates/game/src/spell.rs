@@ -16,6 +16,8 @@ use physand_sim::{
 };
 
 pub const MAX_REAGENTS: usize = 3;
+/// Flask volume regained per tick before relics.
+pub const BASE_REGEN: f32 = 0.6;
 pub const MAX_CATALYSTS: usize = 2;
 
 const PARTICLE_MAX_LIFE: u16 = 240;
@@ -376,7 +378,7 @@ impl Flask {
             catalysts: Vec::new(),
             volume: 300.0,
             capacity: 300.0,
-            regen: 0.6,
+            regen: BASE_REGEN,
             cooldown: 0,
             cursor: 0,
         };
@@ -647,6 +649,6 @@ pub fn starter_flasks() -> Vec<Flask> {
         mk(&[id::WATER], Form::Spray, &[]),
         mk(&[id::OIL], Form::Orb, &[Catalyst::Heat]),
         mk(&[id::SAND], Form::Wall, &[Catalyst::Heat]),
-        mk(&[id::ACID], Form::Rain, &[]),
+        mk(&[id::SAND], Form::Spray, &[]),
     ]
 }

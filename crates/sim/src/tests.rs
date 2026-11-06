@@ -457,3 +457,102 @@ fn wax_resists_everything_but_heat() {
     assert!(w.count(id::WAX) < wax, "heat melts wax");
     assert!(w.count(id::OIL) > 0, "molten wax becomes oil");
 }
+
+// ---- M4: gold, Distillery, wyrm arena -----------------------------------------
+
+#[test]
+fn gold_sinks_through_liquids() {
+    let mut w = World::new(3, 20, 22);
+    for y in 10..20 {
+        for x in 0..3 {
+            w.set(x, y, id::LAVA);
+        }
+    }
+    w.set(1, 0, id::GOLD);
+    run(&mut w, 400);
+    assert_eq!(
+        w.get(1, 19),
+        id::GOLD,
+        "gold is lost at the bottom of the lava"
+    );
+}
+
+#[test]
+fn dune_floor_has_gold() {
+    let level = crate::worldgen::dune_catacombs(1024, 768, 5);
+    assert!(
+        level.world.count(id::GOLD) > 60,
+        "gold: {}",
+        level.world.count(id::GOLD)
+    );
+}
+
+#[test]
+fn distillery_has_every_station_and_is_safe() {
+    use crate::worldgen::{distillery, Marker};
+    let level = distillery(9);
+    assert_eq!(level.marked(Marker::Pedestal).len(), 3);
+    assert_eq!(level.marked(Marker::ShopSlot).len(), 3);
+    assert_eq!(level.marked(Marker::Fountain).len(), 1);
+    assert_eq!(level.marked(Marker::Workbench).len(), 1);
+    let w = &level.world;
+    assert_eq!(w.count(id::LAVA) + w.count(id::FIRE) + w.count(id::ACID), 0);
+    // Stations and the rift are reachable on foot from the spawn.
+    let (sx, sy) = level.spawn;
+    assert_eq!(w.get(sx, sy), id::EMPTY);
+    let seen = reachable(w, (sx, sy), |m| {
+        !matches!(m, id::OBSIDIAN | id::SANDSTONE | id::WOOD)
+    });
+    let ww = w.width() as i32;
+    for (_, r) in &level.markers {
+        let (cx, cy) = (r.x + r.w / 2, r.y + 2);
+        assert!(
+            seen[(cy * ww + cx) as usize],
+            "station at {r:?} unreachable"
+        );
+    }
+    let (ex, ey) = level.exit.unwrap().center();
+    assert!(seen[(ey * ww + ex) as usize], "rift unreachable");
+    // The water stays in its basin.
+    assert!(w.count(id::WATER) > 50);
+    // No step along the floor is taller than the alchemist can step up (3),
+    // so the room can be walked from the spawn to the rift.
+    let surface = |x: i32| {
+        (sy - 20..w.height() as i32)
+            .find(|&y| !matches!(w.get(x, y), id::EMPTY | id::WATER))
+            .unwrap()
+    };
+    for x in sx..level.exit.unwrap().x {
+        let step = surface(x) - surface(x + 1);
+        assert!(step.abs() <= 3, "a {}-cell step at x={x}", step.abs());
+    }
+}
+
+#[test]
+fn wyrm_arena_is_sealed_and_marked() {
+    use crate::worldgen::{wyrm_arena, Marker};
+    let level = wyrm_arena(3);
+    let w = &level.world;
+    let (ww, wh) = (w.width() as i32, w.height() as i32);
+    for x in 0..ww {
+        assert_eq!(w.get(x, 0), id::OBSIDIAN);
+        assert_eq!(w.get(x, wh - 1), id::OBSIDIAN);
+    }
+    assert_eq!(level.marked(Marker::BossLair).len(), 1);
+    assert_eq!(level.marked(Marker::RiftSpot).len(), 1);
+    assert!(w.count(id::SAND) > 20_000, "a deep sand sea for the wyrm");
+    let (sx, sy) = level.spawn;
+    assert_eq!(w.get(sx, sy), id::EMPTY);
+    assert_eq!(w.get(sx, sy + 1), id::ROCK, "spawn ledge");
+    // The rift that opens on victory is within a jump of the ground below it.
+    let rift = level.marked(Marker::RiftSpot)[0];
+    let (rx, _) = rift.center();
+    let ground = (rift.y + rift.h..wh)
+        .find(|&y| w.get(rx, y) != id::EMPTY)
+        .unwrap();
+    assert!(
+        ground - (rift.y + rift.h) < 20,
+        "rift floats {} cells up",
+        ground - (rift.y + rift.h)
+    );
+}
