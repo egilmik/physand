@@ -255,28 +255,39 @@ impl Player {
         }
     }
 
-    /// Hot cells touching the body hurt. Returns `true` on death.
+    /// Fire, lava, acid and scalding cells touching the body hurt.
+    /// Returns `true` on death.
     fn take_environment_damage(&mut self, world: &World) -> bool {
-        let (mut fire, mut lava) = (0, 0);
+        let mut dmg: f32 = 0.0;
         for cy in self.y - 1..=self.y + PLAYER_H {
             for cx in self.x - 1..=self.x + PLAYER_W {
-                match world.get(cx, cy) {
-                    id::FIRE => fire += 1,
-                    id::LAVA => lava += 1,
-                    _ => {}
-                }
+                let Some(cell) = world.cell(cx, cy) else {
+                    continue;
+                };
+                dmg += match cell.mat {
+                    id::FIRE => 0.08,
+                    id::LAVA => 0.5,
+                    id::ACID => 0.15,
+                    id::EMPTY => 0.0,
+                    _ if cell.temp >= 180 => 0.05,
+                    _ => 0.0,
+                };
             }
         }
-        let dmg = (fire as f32 * 0.08 + lava as f32 * 0.5).min(4.0);
+        let dmg = dmg.min(4.0);
         if dmg > 0.0 {
             self.damage(dmg);
         }
         if self.hp <= 0.0 {
-            self.hp = 0.0;
-            self.dead_timer = RESPAWN_TICKS;
+            self.kill();
             return true;
         }
         false
+    }
+
+    pub fn kill(&mut self) {
+        self.hp = 0.0;
+        self.dead_timer = RESPAWN_TICKS;
     }
 
     pub fn damage(&mut self, amount: f32) {

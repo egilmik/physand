@@ -5,13 +5,13 @@ use physand_sim::{
     material::props,
     rng::Rng,
     worldgen::{cave_level, Level},
-    Cell, World,
+    GpuCell, World,
 };
 
 use crate::input::Input;
 use crate::player::{Player, PLAYER_H, PLAYER_W};
 use crate::render::{Overlay, Rgba};
-use crate::spell::{Flask, Particle};
+use crate::spell::{starter_flasks, CastCtx, Catalyst, Flask, Particle, ParticleKind};
 
 pub const WORLD_W: u32 = 1024;
 pub const WORLD_H: u32 = 768;
@@ -24,11 +24,15 @@ pub const DIG_RADIUS: i32 = 4;
 const CAMERA_LERP: f32 = 0.12;
 /// How far the camera leans toward the aim point (0 = locked on player).
 const CAMERA_LOOKAHEAD: f32 = 0.2;
+/// Most damage the player can take from explosions in a single tick, so a
+/// chain reaction of tiny blasts is not instantly lethal.
+const MAX_BLAST_DAMAGE_PER_TICK: f32 = 25.0;
 
 pub struct Game {
     pub world: World,
     pub player: Player,
-    pub flask: Flask,
+    pub flasks: Vec<Flask>,
+    active_flask: usize,
     particles: Vec<Particle>,
     spawn: (i32, i32),
     input: Input,
@@ -36,7 +40,7 @@ pub struct Game {
     rng: Rng,
     cam_x: f32,
     cam_y: f32,
-    view_cells: Vec<Cell>,
+    view_cells: Vec<GpuCell>,
     overlay: Vec<Rgba>,
     pub deaths: u32,
 }
@@ -57,7 +61,8 @@ impl Game {
         let mut game = Game {
             world,
             player,
-            flask: Flask::water_spray(),
+            flasks: starter_flasks(),
+            active_flask: 0,
             particles: Vec::new(),
             spawn,
             input: Input::default(),
@@ -65,7 +70,7 @@ impl Game {
             rng: Rng::new(seed ^ 0x5EED_0001),
             cam_x: 0.0,
             cam_y: 0.0,
-            view_cells: vec![Cell::EMPTY; (VIEW_W * VIEW_H) as usize],
+            view_cells: vec![[0; 4]; (VIEW_W * VIEW_H) as usize],
             overlay: vec![[0; 4]; (VIEW_W * VIEW_H) as usize],
             deaths: 0,
         };
@@ -98,6 +103,26 @@ impl Game {
         self.particles.len()
     }
 
+    pub fn active_flask(&self) -> usize {
+        self.active_flask
+    }
+
+    pub fn flask(&self) -> &Flask {
+        &self.flasks[self.active_flask]
+    }
+
+    pub fn select_flask(&mut self, index: usize) {
+        if index < self.flasks.len() {
+            self.active_flask = index;
+        }
+    }
+
+    /// Cycle the active flask by `delta` slots (mouse wheel).
+    pub fn cycle_flask(&mut self, delta: i32) {
+        let n = self.flasks.len() as i32;
+        self.active_flask = (self.active_flask as i32 + delta).rem_euclid(n) as usize;
+    }
+
     pub fn step(&mut self) {
         let input = self.input;
 
@@ -106,13 +131,20 @@ impl Game {
                 self.dig(input.aim_x, input.aim_y);
             }
             if input.cast {
+                // Turn to face the spell so it leaves from the near hand.
+                let (px, _) = self.player.center();
+                if (input.aim_x - px).abs() > 1.0 {
+                    self.player.facing = if input.aim_x > px { 1 } else { -1 };
+                }
                 let origin = self.hand();
-                self.flask.cast(
+                let mut ctx = CastCtx {
+                    world: &mut self.world,
+                    rng: &mut self.rng,
+                    particles: &mut self.particles,
                     origin,
-                    (input.aim_x, input.aim_y),
-                    &mut self.rng,
-                    &mut self.particles,
-                );
+                    target: (input.aim_x, input.aim_y),
+                };
+                self.flasks[self.active_flask].cast(&mut ctx);
             }
             if self.player.update(&mut self.world, &input) {
                 self.deaths += 1;
@@ -124,16 +156,55 @@ impl Game {
             }
         }
 
-        self.flask.tick();
-        let world = &mut self.world;
-        self.particles.retain_mut(|p| p.update(world));
+        for flask in &mut self.flasks {
+            flask.tick();
+        }
+        let (world, rng) = (&mut self.world, &mut self.rng);
+        self.particles.retain_mut(|p| p.update(world, rng));
         self.world.step();
+        self.apply_explosions();
         self.update_camera();
+    }
+
+    /// Blasts near the player hurt and knock them back.
+    fn apply_explosions(&mut self) {
+        let blasts = self.world.take_explosions();
+        if !self.player.alive() {
+            return;
+        }
+        let (px, py) = self.player.center();
+        let mut damage = 0.0;
+        for b in blasts {
+            let (dx, dy) = (px - b.x as f32, py - b.y as f32);
+            let dist = (dx * dx + dy * dy).sqrt();
+            let reach = b.radius as f32 * 2.5 + 4.0;
+            if dist >= reach {
+                continue;
+            }
+            let falloff = 1.0 - dist / reach;
+            damage += 30.0 * falloff * (b.radius as f32 / 7.0).clamp(0.4, 1.5);
+            let (nx, ny) = if dist > 0.01 {
+                (dx / dist, dy / dist)
+            } else {
+                (0.0, -1.0)
+            };
+            self.player.vx += nx * 4.0 * falloff;
+            self.player.vy += ny * 4.0 * falloff - 0.5 * falloff;
+        }
+        if damage > 0.0 {
+            self.player.damage(damage.min(MAX_BLAST_DAMAGE_PER_TICK));
+            if self.player.hp <= 0.0 && self.player.alive() {
+                self.player.kill();
+                self.deaths += 1;
+            }
+        }
     }
 
     fn respawn(&mut self) {
         self.player = Player::new(self.spawn.0, self.spawn.1);
-        self.flask.refill();
+        for flask in &mut self.flasks {
+            flask.refill();
+        }
     }
 
     /// Where spells leave the player: the flask hand.
@@ -206,12 +277,9 @@ impl Game {
         self.world.copy_region(cx, cy, vw, vh, &mut self.view_cells);
 
         let flask_color = {
-            let [r, g, b] = props(self.flask.material).color;
-            let glow = if self.flask.volume >= self.flask.cost {
-                255
-            } else {
-                120
-            };
+            let f = self.flask();
+            let [r, g, b] = f.color();
+            let glow = if f.volume >= f.cost() { 255 } else { 120 };
             [r, g, b, glow]
         };
         let dig_ring = self
@@ -226,13 +294,30 @@ impl Game {
         o.clear();
 
         for p in &self.particles {
-            let [r, g, b] = props(p.mat).color;
-            let lighten = |c: u8| c.saturating_add(40);
-            o.put(
-                p.x.floor() as i32 - cx,
-                p.y.floor() as i32 - cy,
-                [lighten(r), lighten(g), lighten(b), 255],
-            );
+            let mut c = props(p.mat()).color.map(|v| v.saturating_add(40));
+            // Tint by temperature so hot and cold spells read at a glance.
+            if p.payload.impact_heat > 0 {
+                c = [255, c[1].max(150), c[2] / 2];
+            } else if p.payload.impact_heat < 0 {
+                c = [c[0] / 2 + 100, c[1] / 2 + 120, 255];
+            }
+            let (x, y) = (p.x.floor() as i32 - cx, p.y.floor() as i32 - cy);
+            match p.kind {
+                ParticleKind::Droplet => o.put(x, y, [c[0], c[1], c[2], 255]),
+                ParticleKind::Orb => {
+                    for (dx, dy) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        o.put(x + dx, y + dy, [c[0], c[1], c[2], 255]);
+                    }
+                    let rim = if p.payload.volatile {
+                        [255, 60, 40, 220]
+                    } else {
+                        [255, 255, 255, 120]
+                    };
+                    for (dx, dy) in [(1, 1), (-1, 1), (1, -1), (-1, -1)] {
+                        o.put(x + dx, y + dy, rim);
+                    }
+                }
+            }
         }
 
         let pl = &self.player;
@@ -256,7 +341,7 @@ impl Game {
     }
 
     /// RGBA8 cell data for the view, `VIEW_W * VIEW_H * 4` bytes.
-    pub fn view_cells(&self) -> &[Cell] {
+    pub fn view_cells(&self) -> &[GpuCell] {
         &self.view_cells
     }
 
@@ -272,5 +357,33 @@ impl Game {
 
     pub fn player_size() -> (i32, i32) {
         (PLAYER_W, PLAYER_H)
+    }
+
+    /// Reconfigure a flask from wasm-friendly codes (`255` = empty slot).
+    /// Returns `false` if the recipe is invalid.
+    pub fn configure_flask(
+        &mut self,
+        index: usize,
+        reagents: &[u8],
+        form: u8,
+        catalysts: &[u8],
+    ) -> bool {
+        use crate::spell::Form;
+        let Some(flask) = self.flasks.get_mut(index) else {
+            return false;
+        };
+        let reagents: Vec<u8> = reagents.iter().copied().filter(|&r| r != 255).collect();
+        let Some(&form) = Form::ALL.get(form as usize) else {
+            return false;
+        };
+        let catalysts: Option<Vec<Catalyst>> = catalysts
+            .iter()
+            .filter(|&&c| c != 255)
+            .map(|&c| Catalyst::ALL.get(c as usize).copied())
+            .collect();
+        match catalysts {
+            Some(cats) => flask.configure(&reagents, form, &cats).is_ok(),
+            None => false,
+        }
     }
 }

@@ -211,7 +211,7 @@ fn water_spray_deposits_real_water() {
         ..idle()
     };
     hold(&mut g, cast, 30);
-    assert!(g.flask.volume < g.flask.capacity - 50.0);
+    assert!(g.flask().volume < g.flask().capacity - 50.0);
     hold(&mut g, idle(), 200);
     assert_eq!(g.particle_count(), 0, "all particles landed");
     let water = g.world.count(id::WATER);
@@ -276,4 +276,228 @@ fn falling_sand_is_pushed_off_the_player() {
         "sand is displaced, not destroyed"
     );
     assert!(!Player::overlaps(&g.world, g.player.x, g.player.y));
+}
+
+// ---- M2: spell system -------------------------------------------------------
+
+use crate::spell::{Catalyst, Flask, Form};
+
+const NONE: u8 = 255;
+
+/// Room with a rock floor at y=100 and a ceiling at y=40; player at x=40.
+fn arena() -> Game {
+    let mut world = room(260, 120, 100);
+    for x in 0..260 {
+        for y in 0..40 {
+            world.set(x, y, id::ROCK);
+        }
+    }
+    let mut g = game_in(world, (40, 99));
+    hold(&mut g, idle(), 5);
+    g
+}
+
+fn cast_at(g: &mut Game, x: f32, y: f32, ticks: u32) {
+    hold(
+        g,
+        Input {
+            cast: true,
+            aim_x: x,
+            aim_y: y,
+            ..idle()
+        },
+        ticks,
+    );
+}
+
+fn settle(g: &mut Game, ticks: u32) {
+    hold(g, idle(), ticks);
+}
+
+#[test]
+fn starter_flasks_have_generated_names_and_costs() {
+    let g = arena();
+    let names: Vec<String> = g.flasks.iter().map(Flask::name).collect();
+    assert_eq!(
+        names,
+        [
+            "Water Spray",
+            "Searing Oil Orb",
+            "Searing Sand Wall",
+            "Acid Rain"
+        ]
+    );
+    assert!((g.flasks[1].cost() - 39.0).abs() < 1e-3);
+}
+
+#[test]
+fn flask_configuration_is_validated() {
+    let mut g = arena();
+    let orb = Form::ALL.iter().position(|&f| f == Form::Orb).unwrap() as u8;
+    assert!(
+        !g.configure_flask(0, &[NONE, NONE, NONE], orb, &[NONE, NONE]),
+        "needs a reagent"
+    );
+    assert!(
+        !g.configure_flask(0, &[id::ROCK, NONE, NONE], orb, &[NONE, NONE]),
+        "rock is not a reagent"
+    );
+    assert!(
+        !g.configure_flask(0, &[id::WATER, NONE, NONE], orb, &[0, 0]),
+        "no duplicate catalysts"
+    );
+    assert!(
+        !g.configure_flask(9, &[id::WATER, NONE, NONE], orb, &[NONE, NONE]),
+        "no such flask"
+    );
+    assert!(g.configure_flask(0, &[id::WATER, id::OIL, NONE], orb, &[2, NONE]));
+    assert_eq!(g.flasks[0].name(), "Volatile Water-Oil Orb");
+}
+
+#[test]
+fn flask_selection_cycles() {
+    let mut g = arena();
+    g.cycle_flask(-1);
+    assert_eq!(g.active_flask(), 3);
+    g.cycle_flask(2);
+    assert_eq!(g.active_flask(), 1);
+    g.select_flask(2);
+    assert_eq!(g.active_flask(), 2);
+    g.select_flask(7);
+    assert_eq!(g.active_flask(), 2);
+}
+
+#[test]
+fn searing_sand_wall_becomes_glass() {
+    let mut g = arena();
+    g.select_flask(2);
+    cast_at(&mut g, 70.0, 85.0, 1);
+    settle(&mut g, 10);
+    assert!(
+        g.world.count(id::GLASS) >= 20,
+        "glass: {}",
+        g.world.count(id::GLASS)
+    );
+    assert_eq!(g.world.count(id::SAND), 0);
+}
+
+#[test]
+fn searing_oil_orb_starts_a_fire() {
+    let mut g = arena();
+    g.select_flask(1);
+    cast_at(&mut g, 120.0, 95.0, 1);
+    let mut burned = false;
+    for _ in 0..120 {
+        settle(&mut g, 1);
+        burned |= g.world.count(id::FIRE) > 10;
+    }
+    assert!(burned, "hot oil should ignite on landing");
+}
+
+#[test]
+fn frozen_water_spray_makes_ice() {
+    let mut g = arena();
+    let spray = 0;
+    assert!(g.configure_flask(0, &[id::WATER, NONE, NONE], spray, &[1, NONE]));
+    cast_at(&mut g, 90.0, 98.0, 20);
+    settle(&mut g, 60);
+    assert!(
+        g.world.count(id::ICE) > 30,
+        "ice: {}",
+        g.world.count(id::ICE)
+    );
+}
+
+#[test]
+fn frost_orb_turns_lava_to_obsidian() {
+    let mut world = room(260, 120, 100);
+    for x in 100..200 {
+        for y in 90..100 {
+            world.set(x, y, id::LAVA);
+        }
+    }
+    let mut g = game_in(world, (40, 99));
+    let orb = 1;
+    assert!(g.configure_flask(0, &[id::ICE, NONE, NONE], orb, &[1, NONE]));
+    cast_at(&mut g, 130.0, 80.0, 1);
+    settle(&mut g, 80);
+    assert!(
+        g.world.count(id::OBSIDIAN) > 10,
+        "obsidian: {}",
+        g.world.count(id::OBSIDIAN)
+    );
+}
+
+#[test]
+fn volatile_orb_blasts_a_crater_and_hurts_up_close() {
+    let mut g = arena();
+    let orb = 1;
+    assert!(g.configure_flask(0, &[id::WATER, NONE, NONE], orb, &[2, NONE]));
+    let rock = g.world.count(id::ROCK);
+    cast_at(&mut g, 150.0, 101.0, 1);
+    settle(&mut g, 120);
+    let carved = rock - g.world.count(id::ROCK);
+    assert!(carved > 15, "crater carved: {carved}");
+    assert_eq!(g.player.hp, 100.0, "a distant blast does not hurt");
+
+    // Blasting your own feet hurts and knocks you back.
+    settle(&mut g, 30);
+    let x0 = g.player.x;
+    cast_at(&mut g, 47.0, 101.0, 1);
+    settle(&mut g, 10);
+    assert!(g.player.hp < 100.0);
+    assert_ne!(g.player.x, x0, "knockback moved the player");
+}
+
+#[test]
+fn transmute_orb_converts_what_it_hits() {
+    let mut g = arena();
+    let orb = 1;
+    assert!(g.configure_flask(0, &[id::SAND, NONE, NONE], orb, &[4, NONE]));
+    let rock = g.world.count(id::ROCK);
+    cast_at(&mut g, 120.0, 101.0, 1);
+    settle(&mut g, 60);
+    assert!(g.world.count(id::ROCK) < rock);
+    assert!(g.world.count(id::SAND) > 10, "rock became sand");
+}
+
+#[test]
+fn rain_falls_from_the_ceiling() {
+    let mut g = arena();
+    g.select_flask(3);
+    cast_at(&mut g, 150.0, 95.0, 2);
+    // Droplets start just under the ceiling (y=40), far above the aim point.
+    hold(&mut g, idle(), 1);
+    assert!(g.particle_count() > 0);
+    settle(&mut g, 200);
+    let acid_or_eaten = g.world.count(id::ACID) > 0 || g.world.count(id::SMOKE) > 0;
+    assert!(acid_or_eaten, "acid reached the floor");
+}
+
+#[test]
+fn multi_reagent_spray_mixes_materials() {
+    let mut g = arena();
+    assert!(g.configure_flask(0, &[id::WATER, id::SAND, NONE], 0, &[NONE, NONE]));
+    cast_at(&mut g, 90.0, 95.0, 20);
+    settle(&mut g, 100);
+    assert!(g.world.count(id::WATER) > 10);
+    assert!(g.world.count(id::SAND) > 10);
+}
+
+#[test]
+fn heat_and_frost_cancel() {
+    let f = Flask::new(
+        &[id::WATER],
+        Form::Spray,
+        &[Catalyst::Heat, Catalyst::Frost],
+    )
+    .unwrap();
+    assert_eq!(f.name(), "Searing Frozen Water Spray");
+    let mut g = arena();
+    assert!(g.configure_flask(0, &[id::WATER, NONE, NONE], 0, &[0, 1]));
+    cast_at(&mut g, 90.0, 98.0, 20);
+    settle(&mut g, 60);
+    assert_eq!(g.world.count(id::ICE), 0);
+    assert_eq!(g.world.count(id::STEAM), 0);
+    assert!(g.world.count(id::WATER) > 30);
 }

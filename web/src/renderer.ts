@@ -28,12 +28,16 @@ const int LAVA = ${ids.lava};
 const int WATER = ${ids.water};
 const int STEAM = ${ids.steam};
 const int SMOKE = ${ids.smoke};
+const int ACID = ${ids.acid};
+const int ICE = ${ids.ice};
+const int GLASS = ${ids.glass};
 
 void main() {
   vec4 c = texture(u_cells, v_uv);
   int mat = int(c.r * 255.0 + 0.5);
   float v = c.g;                 // per-cell variation, 0..1
   float life = c.b * 255.0;
+  float temp = c.a * 255.0;
   vec2 world = u_cam + v_uv * u_view;
 
   // Cave backdrop: dark, slightly mottled, deeper is darker.
@@ -58,6 +62,23 @@ void main() {
     // Gases fade out as they age.
     float a = clamp(life / 90.0, 0.25, 0.85);
     col = mix(bg, u_palette[mat] * (0.88 + 0.24 * v), a);
+  } else if (mat == ACID) {
+    col *= 0.85 + 0.25 * sin(u_time * 4.0 + v * 6.2831 + world.x * 0.2);
+  } else if (mat == GLASS) {
+    // See-through with the odd glint.
+    col = mix(bg, col, 0.45) + 0.12 * step(0.94, v);
+  } else if (mat == ICE) {
+    col *= 0.94 + 0.12 * step(0.9, fract(v * 13.0 + u_time * 0.15));
+  }
+
+  // Temperature: anything scalding glows; anything frozen frosts over.
+  bool emissive = mat == EMPTY || mat == FIRE || mat == LAVA || mat == STEAM || mat == SMOKE;
+  if (!emissive) {
+    float hot = smoothstep(120.0, 250.0, temp);
+    col = mix(col, vec3(1.0, 0.38, 0.08), hot * 0.75) + vec3(0.25, 0.08, 0.0) * hot;
+    if (mat != ICE) {
+      col = mix(col, vec3(0.75, 0.9, 1.0), smoothstep(25.0, 0.0, temp) * 0.4);
+    }
   }
   vec4 over = texture(u_overlay, v_uv);
   col = mix(col, over.rgb, over.a);
@@ -70,6 +91,9 @@ export interface MaterialIds {
   water: number;
   steam: number;
   smoke: number;
+  acid: number;
+  ice: number;
+  glass: number;
 }
 
 export class Renderer {

@@ -2,8 +2,12 @@
 //! frame it pushes input, advances fixed ticks, asks Rust to compose the
 //! view, then uploads the view and overlay buffers straight from wasm memory.
 
-use physand_game::{player, Game, Input, VIEW_H, VIEW_W};
-use physand_sim::MATERIALS;
+use physand_game::{
+    player,
+    spell::{Catalyst, Flask, Form},
+    Game, Input, VIEW_H, VIEW_W,
+};
+use physand_sim::{material::reagents, MATERIALS};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -92,20 +96,81 @@ impl Physand {
         player::MAX_STAMINA
     }
 
-    pub fn flask_volume(&self) -> f32 {
-        self.game.flask.volume
+    // --- Flasks ---------------------------------------------------------------
+
+    pub fn flask_count(&self) -> u32 {
+        self.game.flasks.len() as u32
     }
 
-    pub fn flask_capacity(&self) -> f32 {
-        self.game.flask.capacity
+    pub fn active_flask(&self) -> u32 {
+        self.game.active_flask() as u32
     }
 
-    pub fn flask_name(&self) -> String {
-        self.game.flask.name.to_string()
+    pub fn select_flask(&mut self, index: u32) {
+        self.game.select_flask(index as usize);
     }
 
-    pub fn flask_material(&self) -> u8 {
-        self.game.flask.material
+    pub fn cycle_flask(&mut self, delta: i32) {
+        self.game.cycle_flask(delta);
+    }
+
+    pub fn flask_name(&self, index: u32) -> String {
+        self.flask(index).map_or_else(String::new, |f| f.name())
+    }
+
+    pub fn flask_volume(&self, index: u32) -> f32 {
+        self.flask(index).map_or(0.0, |f| f.volume)
+    }
+
+    pub fn flask_capacity(&self, index: u32) -> f32 {
+        self.flask(index).map_or(1.0, |f| f.capacity)
+    }
+
+    pub fn flask_cost(&self, index: u32) -> f32 {
+        self.flask(index).map_or(0.0, |f| f.cost())
+    }
+
+    /// Colour of the flask's first reagent, `0xRRGGBB`.
+    pub fn flask_color(&self, index: u32) -> u32 {
+        self.flask(index).map_or(0, |f| pack(f.color()))
+    }
+
+    /// Reagent in `slot` (0..3), or 255 if empty.
+    pub fn flask_reagent(&self, index: u32, slot: u32) -> u8 {
+        self.flask(index)
+            .and_then(|f| f.reagents().get(slot as usize).copied())
+            .unwrap_or(255)
+    }
+
+    /// Index into `form_name`.
+    pub fn flask_form(&self, index: u32) -> u8 {
+        self.flask(index)
+            .and_then(|f| Form::ALL.iter().position(|&x| x == f.form()))
+            .unwrap_or(0) as u8
+    }
+
+    /// Catalyst in `slot` (0..2) as an index into `catalyst_name`, or 255.
+    pub fn flask_catalyst(&self, index: u32, slot: u32) -> u8 {
+        self.flask(index)
+            .and_then(|f| f.catalysts().get(slot as usize))
+            .and_then(|c| Catalyst::ALL.iter().position(|x| x == c))
+            .map_or(255, |i| i as u8)
+    }
+
+    /// Set a flask's recipe. Slots use 255 for "empty". Returns `false` if invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn configure_flask(
+        &mut self,
+        index: u32,
+        r0: u8,
+        r1: u8,
+        r2: u8,
+        form: u8,
+        c0: u8,
+        c1: u8,
+    ) -> bool {
+        self.game
+            .configure_flask(index as usize, &[r0, r1, r2], form, &[c0, c1])
     }
 
     pub fn is_dead(&self) -> bool {
@@ -126,6 +191,10 @@ impl Physand {
         self.game.player.y
     }
 
+    pub fn particle_count(&self) -> u32 {
+        self.game.particle_count() as u32
+    }
+
     pub fn count(&self, mat: u8) -> u32 {
         self.game.world.count(mat) as u32
     }
@@ -137,6 +206,48 @@ impl Physand {
     pub fn chunk_count(&self) -> u32 {
         self.game.world.chunk_count() as u32
     }
+}
+
+impl Physand {
+    fn flask(&self, index: u32) -> Option<&Flask> {
+        self.game.flasks.get(index as usize)
+    }
+}
+
+fn pack([r, g, b]: [u8; 3]) -> u32 {
+    (r as u32) << 16 | (g as u32) << 8 | b as u32
+}
+
+/// Material ids that can be loaded into a flask.
+#[wasm_bindgen]
+pub fn reagent_ids() -> Vec<u8> {
+    reagents().collect()
+}
+
+#[wasm_bindgen]
+pub fn form_count() -> u32 {
+    Form::ALL.len() as u32
+}
+
+#[wasm_bindgen]
+pub fn form_name(i: u32) -> String {
+    Form::ALL
+        .get(i as usize)
+        .map_or("?", |f| f.name())
+        .to_string()
+}
+
+#[wasm_bindgen]
+pub fn catalyst_count() -> u32 {
+    Catalyst::ALL.len() as u32
+}
+
+#[wasm_bindgen]
+pub fn catalyst_name(i: u32) -> String {
+    Catalyst::ALL
+        .get(i as usize)
+        .map_or("?", |c| c.name())
+        .to_string()
 }
 
 #[wasm_bindgen]
@@ -155,8 +266,5 @@ pub fn material_name(mat: u8) -> String {
 /// Base colour packed as `0xRRGGBB`.
 #[wasm_bindgen]
 pub fn material_color(mat: u8) -> u32 {
-    MATERIALS.get(mat as usize).map_or(0, |m| {
-        let [r, g, b] = m.color;
-        (r as u32) << 16 | (g as u32) << 8 | b as u32
-    })
+    MATERIALS.get(mat as usize).map_or(0, |m| pack(m.color))
 }

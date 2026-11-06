@@ -6,39 +6,66 @@ Rust → WebAssembly simulation, WebGL2 rendering.
 
 See [docs/CONCEPT.md](docs/CONCEPT.md) for the game concept and roadmap.
 
-## Status: M1 — the alchemist
+## Status: M2 — the spell system
 
-Explore a procedurally generated 1024×768 cave as the alchemist. The camera
-follows you through cellular-automaton caves with sand veins (which collapse
-when you dig under them), water and oil pockets, wooden scaffolding and a lava
-lake at the bottom.
+Explore a procedurally generated 1024×768 cave as the alchemist, crafting
+spells from materials. Caves have sand veins (which collapse when you dig
+under them), water and oil pockets, wooden scaffolding and a lava lake.
 
-- **Movement:** walk, step up small ledges and sand slopes, jump, hold jump to
-  levitate (limited stamina, refills on the ground), swim in liquids.
-- **Spell:** a *Water Spray* flask. Particles fly through the air and become real
-  water cells when they land, so the simulation takes over: put out fires,
-  cool lava into obsidian, flood tunnels.
-- **Digging:** soft sand goes quickly, wood slower, rock slowly; obsidian can't be dug.
-- **Danger:** fire and lava hurt; at 0 HP you respawn at the start.
-- **Brush mode** (Tab) keeps the M0 sandbox tools for experimenting.
+### Spellcraft
+
+Each of your 4 flasks combines:
+
+| Slot | Options |
+|------|---------|
+| **Reagents** (1–3) | Water, Sand, Oil, Acid, Lava, Ice, Gunpowder, Wood |
+| **Form** (1) | **Spray** (stream) · **Orb** (bursts into a blob) · **Rain** (falls from the ceiling above the cursor) · **Wall** (instant barrier) |
+| **Catalysts** (0–2) | **Heat** (scalding material, heats targets) · **Frost** (frozen material, chills targets) · **Volatile** (explodes on impact) · **Bloom** (more material) · **Transmute** (turns what it hits into the reagent) |
+
+Spells only place material, change temperature or trigger explosions; the
+simulation does the rest. Some combos to try: *Searing Sand Wall* (glass
+barrier), *Searing Oil Orb* (napalm), *Frozen Water Wall* (ice bridge), *Frost
+Orb* on lava (obsidian), *Volatile Water Orb* (digging bomb), *Searing
+Gunpowder Orb* (big bomb), *Transmuting Sand Orb* (turn rock into sand),
+*Acid Rain* (eat through ceilings). Names are generated from the recipe.
+Open the **Spellcraft** panel (`C`) to edit flasks. In later milestones
+reagents and catalysts become loot.
+
+### Chemistry
+
+Every cell has a temperature. Heat flows between conductive materials and
+cools in open air; rock and obsidian insulate. Materials change phase at
+thresholds (water ⇄ ice/steam, sand → glass, chilled lava → obsidian, hot
+oil/wood ignite, hot gunpowder detonates). Pairwise reactions are a data
+table (`crates/sim/src/reaction.rs`): lava + water → obsidian + steam, acid
+eats rock/sand/wood (not glass or obsidian), fire spreads through fuel, and
+so on. Explosions break diggable material, chain through gunpowder, and hurt
+and knock back the player. Hot cells glow and frozen cells frost over.
 
 | Material | Behaviour |
 |----------|-----------|
-| Sand | Falls and piles; sinks through liquids; diggable |
-| Water | Flows and levels out; puts out fire (→ steam) |
-| Oil | Floats on water; very flammable |
-| Lava | Slow, viscous; ignites fuel; + water → obsidian + steam |
+| Sand | Falls and piles; sinks through liquids; melts into glass |
+| Water | Flows; freezes below 20, boils at 100; puts out fire |
+| Oil | Floats on water; ignites when hot or touched by fire |
+| Lava | Viscous, very hot; ignites fuel; + water → obsidian; chilled → obsidian |
+| Acid | Dissolves rock, sand, wood, ice, gunpowder; harmless to glass/obsidian; hurts |
+| Ice | Melts when warmed; chills neighbouring water |
+| Gunpowder | Powder that detonates in chains when hot or burning |
+| Glass | See-through, acid-proof barrier |
 | Fire | Rises and flickers; clings to and spreads through fuel |
 | Wood | Static fuel; burns as stationary embers |
 | Steam / Smoke | Rise and dissipate; steam condenses back into water |
-| Rock / Obsidian | Static solids (rock is slowly diggable) |
+| Rock / Obsidian | Static insulating solids (rock is slowly diggable, obsidian immune to spells) |
 
 **Controls:** `A`/`D` move · `W`/`Space` jump (hold to levitate or swim) ·
-left click cast · right click dig · `Tab` toggle brush mode · `P` pause · `R` new level.
-In brush mode: left paint, right erase, wheel or `[` `]` brush size, `1`–`9`/`0` material.
+left click cast · right click dig · `1`–`4` or mouse wheel select flask ·
+`C` spellcraft · `Tab` brush mode · `P` pause · `R` new level.
+In brush mode: left paint, right erase, wheel or `[` `]` brush size, number keys pick material.
+Add `?seed=123` to the URL to replay a level.
 
-The simulation only updates 32×32 chunks where something changed recently, so
-settled terrain is free; a typical tick costs ~2 ms in the browser.
+The simulation only updates 32×32 chunks where something changed recently (or
+where a reaction is still possible), so settled terrain is free; a typical tick
+costs 2–5 ms in the browser.
 
 ## Running locally
 

@@ -1,4 +1,14 @@
-import init, { Physand, material_color, material_count, material_name } from "./wasm/physand.js";
+import init, {
+  Physand,
+  catalyst_count,
+  catalyst_name,
+  form_count,
+  form_name,
+  material_color,
+  material_count,
+  material_name,
+  reagent_ids,
+} from "./wasm/physand.js";
 import { Renderer, type MaterialIds } from "./renderer";
 
 const TICK_HZ = 60;
@@ -38,12 +48,17 @@ async function main() {
     water: idOf("Water"),
     steam: idOf("Steam"),
     smoke: idOf("Smoke"),
+    acid: idOf("Acid"),
+    ice: idOf("Ice"),
+    glass: idOf("Glass"),
   };
   const cssColor = (mat: number) =>
     `rgb(${Array.from(palette.slice(mat * 3, mat * 3 + 3), (v) => Math.round(v * 255)).join(",")})`;
 
   const newSeed = () => (Math.random() * 2 ** 32) >>> 0;
-  let seed = newSeed();
+  // `?seed=123` replays a specific level.
+  const seedParam = Number(new URLSearchParams(location.search).get("seed"));
+  let seed = Number.isInteger(seedParam) && seedParam > 0 ? seedParam >>> 0 : newSeed();
   const game = new Physand(seed);
   const VIEW_W = game.view_width();
   const VIEW_H = game.view_height();
@@ -121,13 +136,14 @@ async function main() {
   const newLevel = () => {
     seed = newSeed();
     game.reset(seed);
+    renderRecipes();
   };
   $<HTMLButtonElement>("#reset").addEventListener("click", newLevel);
 
   // ---- Keyboard -------------------------------------------------------------
   const GAME_KEYS = new Set(["KeyA", "KeyD", "KeyW", "ArrowLeft", "ArrowRight", "ArrowUp", "Space"]);
   window.addEventListener("keydown", (e) => {
-    if (e.target instanceof HTMLInputElement) return;
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
     if (GAME_KEYS.has(e.code)) {
       e.preventDefault();
       keys.add(e.code);
@@ -141,13 +157,18 @@ async function main() {
       togglePause();
     } else if (e.code === "KeyR") {
       newLevel();
+    } else if (e.code === "KeyC") {
+      toggleSpellcraft();
+    } else if (e.code === "Escape" && !spellcraft.hidden) {
+      toggleSpellcraft(false);
     } else if (/^Digit[0-9]$/.test(e.code)) {
       const d = Number(e.code.slice(5));
-      const mat = paintable[d === 0 ? 9 : d - 1];
-      if (mat !== undefined) {
-        selectMaterial(mat);
-        setMode("brush");
+      if (state.mode === "alchemist") {
+        if (d >= 1 && d <= game.flask_count()) game.select_flask(d - 1);
+        return;
       }
+      const mat = paintable[d === 0 ? 9 : d - 1];
+      if (mat !== undefined) selectMaterial(mat);
     } else if (e.key === "[") {
       setBrush(state.brush - 1);
     } else if (e.key === "]") {
@@ -184,7 +205,8 @@ async function main() {
     "wheel",
     (e) => {
       e.preventDefault();
-      setBrush(state.brush + (e.deltaY < 0 ? 1 : -1));
+      if (state.mode === "alchemist") game.cycle_flask(e.deltaY < 0 ? -1 : 1);
+      else setBrush(state.brush + (e.deltaY < 0 ? 1 : -1));
     },
     { passive: false },
   );
@@ -227,20 +249,115 @@ async function main() {
   // ---- HUD ------------------------------------------------------------------
   const hpFill = $<HTMLSpanElement>("#hp-bar .fill");
   const staminaFill = $<HTMLSpanElement>("#stamina-bar .fill");
-  const flaskFill = $<HTMLSpanElement>("#flask-bar .fill");
-  const flaskBar = $<HTMLDivElement>("#flask-bar");
   const banner = $<HTMLDivElement>("#banner");
-  $<HTMLSpanElement>("#flask-name").textContent = game.flask_name();
-  flaskBar.style.setProperty("--bar", cssColor(game.flask_material()));
+  const flaskName = $<HTMLDivElement>("#flask-name");
+  const hexColor = (c: number) => `#${c.toString(16).padStart(6, "0")}`;
+
+  // Flask hotbar: one tile per flask, its fill level shows the volume.
+  const flasksEl = $<HTMLDivElement>("#flasks");
+  const flaskTiles: { el: HTMLDivElement; level: HTMLSpanElement }[] = [];
+  for (let i = 0; i < game.flask_count(); i++) {
+    const el = document.createElement("div");
+    el.className = "flask";
+    el.setAttribute("role", "radio");
+    el.innerHTML = `<span class="level"></span><span class="key">${i + 1}</span>`;
+    flasksEl.append(el);
+    flaskTiles.push({ el, level: el.querySelector(".level") as HTMLSpanElement });
+  }
+
   const setFill = (el: HTMLElement, v: number, max: number) => {
     el.style.transform = `scaleX(${Math.max(0, Math.min(1, v / max))})`;
   };
   const updateHud = () => {
     setFill(hpFill, game.hp(), game.max_hp());
     setFill(staminaFill, game.stamina(), game.max_stamina());
-    setFill(flaskFill, game.flask_volume(), game.flask_capacity());
+    const active = game.active_flask();
+    flaskTiles.forEach(({ el, level }, i) => {
+      const vol = game.flask_volume(i);
+      el.classList.toggle("active", i === active);
+      el.classList.toggle("empty", vol < game.flask_cost(i));
+      el.setAttribute("aria-checked", String(i === active));
+      el.style.setProperty("--flask", hexColor(game.flask_color(i)));
+      level.style.transform = `scaleY(${Math.max(0, Math.min(1, vol / game.flask_capacity(i)))})`;
+    });
+    const name = game.flask_name(active);
+    if (flaskName.textContent !== name) flaskName.textContent = name;
     banner.hidden = !game.is_dead();
   };
+
+  // ---- Spellcraft ------------------------------------------------------------
+  const spellcraft = $<HTMLElement>("#spellcraft");
+  const recipesEl = $<HTMLDivElement>("#recipes");
+  const reagentIds = Array.from(reagent_ids());
+  const forms = Array.from({ length: form_count() }, (_, i) => form_name(i));
+  const catalysts = Array.from({ length: catalyst_count() }, (_, i) => catalyst_name(i));
+  const NONE = 255;
+
+  const select = (label: string, options: [number, string][], value: number, onChange: (v: number) => void) => {
+    const wrap = document.createElement("label");
+    wrap.textContent = label;
+    const sel = document.createElement("select");
+    for (const [v, text] of options) sel.add(new Option(text, String(v), false, v === value));
+    sel.addEventListener("change", () => onChange(Number(sel.value)));
+    wrap.append(sel);
+    return wrap;
+  };
+
+  function renderRecipes() {
+    recipesEl.replaceChildren();
+    for (let i = 0; i < game.flask_count(); i++) {
+      const card = document.createElement("div");
+      card.className = "recipe";
+      card.classList.toggle("active", i === game.active_flask());
+      const recipe = {
+        r: [0, 1, 2].map((s) => game.flask_reagent(i, s)),
+        form: game.flask_form(i),
+        c: [0, 1].map((s) => game.flask_catalyst(i, s)),
+      };
+      const title = document.createElement("h3");
+      title.innerHTML = `<span>${i + 1}. ${game.flask_name(i)}</span><span class="cost">${game.flask_cost(i).toFixed(1)} / cast</span>`;
+      card.append(title);
+
+      const apply = () => {
+        const ok = game.configure_flask(i, recipe.r[0], recipe.r[1], recipe.r[2], recipe.form, recipe.c[0], recipe.c[1]);
+        if (ok) {
+          renderRecipes();
+        } else {
+          card.classList.add("invalid");
+          title.firstElementChild!.textContent = `${i + 1}. Invalid recipe`;
+        }
+      };
+
+      const slots = document.createElement("div");
+      slots.className = "slots";
+      const reagentOpts: [number, string][] = reagentIds.map((m) => [m, names[m]]);
+      recipe.r.forEach((v, s) => {
+        const opts: [number, string][] = s === 0 ? reagentOpts : [[NONE, "—"], ...reagentOpts];
+        slots.append(select(`Reagent ${s + 1}`, opts, v, (nv) => ((recipe.r[s] = nv), apply())));
+      });
+      slots.append(
+        select("Form", forms.map((f, k) => [k, f]), recipe.form, (nv) => ((recipe.form = nv), apply())),
+      );
+      const catOpts: [number, string][] = [[NONE, "—"], ...catalysts.map((c, k): [number, string] => [k, c])];
+      recipe.c.forEach((v, s) => {
+        slots.append(select(`Catalyst ${s + 1}`, catOpts, v, (nv) => ((recipe.c[s] = nv), apply())));
+      });
+      card.append(slots);
+      card.addEventListener("click", () => {
+        game.select_flask(i);
+        recipesEl.querySelectorAll(".recipe").forEach((el, k) => el.classList.toggle("active", k === i));
+      });
+      recipesEl.append(card);
+    }
+  }
+
+  function toggleSpellcraft(open = spellcraft.hidden) {
+    spellcraft.hidden = !open;
+    if (open) renderRecipes();
+  }
+  $<HTMLButtonElement>("#spellcraft-open").addEventListener("click", () => toggleSpellcraft());
+  $<HTMLButtonElement>("#spellcraft-close").addEventListener("click", () => toggleSpellcraft(false));
+  renderRecipes();
 
   // ---- Main loop ------------------------------------------------------------
   const statsEl = $<HTMLDivElement>("#stats");

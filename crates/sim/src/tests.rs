@@ -182,3 +182,179 @@ fn cave_level_is_deterministic_with_clear_spawn() {
     }
     assert!(a.world.count(id::LAVA) > 0);
 }
+
+// ---- M2: temperature, reactions, explosions --------------------------------
+
+/// A sealed rock box so nothing escapes and air cooling is minimal.
+fn boxed(w: u32, h: u32, seed: u32) -> World {
+    let mut world = World::new(w, h, seed);
+    for x in 0..w as i32 {
+        world.set(x, h as i32 - 1, id::ROCK);
+    }
+    world
+}
+
+#[test]
+fn temperature_travels_with_moving_cells() {
+    let mut w = World::new(4, 12, 11);
+    w.set_with_temp(1, 0, id::SAND, 200);
+    run(&mut w, 12);
+    assert_eq!(w.get(1, 11), id::SAND);
+    // It cools in the air on the way down, but carries most of its heat.
+    assert!(w.temp(1, 11) > 100, "temp {}", w.temp(1, 11));
+}
+
+#[test]
+fn cold_water_freezes_and_ice_chills_water() {
+    // Water cast with frost (cold) turns into ice.
+    let mut w = boxed(10, 10, 12);
+    w.set_with_temp(5, 8, id::WATER, 5);
+    run(&mut w, 5);
+    assert_eq!(w.get(5, 8), id::ICE);
+
+    // A big block of ice freezes the smaller amount of water around it.
+    let mut w = boxed(20, 20, 13);
+    for y in 10..19 {
+        for x in 0..20 {
+            w.set(
+                x,
+                y,
+                if (4..16).contains(&x) {
+                    id::ICE
+                } else {
+                    id::WATER
+                },
+            );
+        }
+    }
+    let ice0 = w.count(id::ICE);
+    run(&mut w, 300);
+    assert!(
+        w.count(id::ICE) > ice0,
+        "ice should grow into the cold water"
+    );
+}
+
+#[test]
+fn hot_water_boils() {
+    let mut w = boxed(10, 10, 14);
+    w.set_with_temp(5, 8, id::WATER, 160);
+    run(&mut w, 3);
+    assert_eq!(w.count(id::WATER), 0);
+    assert_eq!(w.count(id::STEAM), 1);
+}
+
+#[test]
+fn sand_sinking_into_lava_turns_to_glass() {
+    // Lava holds a finite amount of heat: a few grains dropped into a deep
+    // pool vitrify, while the pool barely cools.
+    let mut w = boxed(12, 16, 15);
+    for x in 0..12 {
+        for y in 6..15 {
+            w.set(x, y, id::LAVA);
+        }
+    }
+    for x in 4..8 {
+        w.set(x, 0, id::SAND);
+    }
+    run(&mut w, 600);
+    assert!(
+        w.count(id::GLASS) >= 2,
+        "sand sank into the lava and became glass"
+    );
+    assert!(w.count(id::LAVA) > 90, "the pool is mostly still molten");
+}
+
+#[test]
+fn chilled_lava_becomes_obsidian() {
+    let mut w = boxed(10, 10, 16);
+    w.set_with_temp(5, 8, id::LAVA, 100);
+    run(&mut w, 3);
+    assert_eq!(w.get(5, 8), id::OBSIDIAN);
+}
+
+#[test]
+fn acid_dissolves_rock_but_not_glass() {
+    let mut w = World::new(20, 12, 17);
+    for x in 0..20 {
+        w.set(x, 11, if x < 10 { id::ROCK } else { id::GLASS });
+    }
+    // Keep acid on each half with a wall.
+    for y in 0..11 {
+        w.set(10, y, id::GLASS);
+    }
+    for x in 0..10 {
+        w.set(x, 10, id::ACID);
+    }
+    for x in 11..20 {
+        w.set(x, 10, id::ACID);
+    }
+    let glass0 = w.count(id::GLASS);
+    run(&mut w, 1500);
+    assert!(w.count(id::ROCK) < 10, "acid ate the rock floor");
+    assert_eq!(w.count(id::GLASS), glass0, "glass is acid-proof");
+}
+
+#[test]
+fn fire_sets_off_gunpowder_chain() {
+    let mut w = boxed(60, 30, 18);
+    for x in 5..55 {
+        for y in 26..29 {
+            w.set(x, y, id::GUNPOWDER);
+        }
+    }
+    w.set(4, 27, id::FIRE);
+    w.set(4, 28, id::FIRE);
+    run(&mut w, 200);
+    assert_eq!(w.count(id::GUNPOWDER), 0, "the whole trail should detonate");
+    assert!(!w.take_explosions().is_empty());
+}
+
+#[test]
+fn explosion_breaks_sand_rock_partially_and_spares_obsidian() {
+    let mut w = World::new(40, 40, 19);
+    for y in 0..40 {
+        for x in 0..40 {
+            let m = if x < 14 {
+                id::SAND
+            } else if x < 27 {
+                id::ROCK
+            } else {
+                id::OBSIDIAN
+            };
+            w.set(x, y, m);
+        }
+    }
+    let (s, r, o) = (w.count(id::SAND), w.count(id::ROCK), w.count(id::OBSIDIAN));
+    w.explode(20, 20, 12);
+    assert!(w.count(id::SAND) < s);
+    assert!(w.count(id::ROCK) < r && w.count(id::ROCK) > r / 2);
+    assert_eq!(w.count(id::OBSIDIAN), o);
+    assert_eq!(w.take_explosions().len(), 1);
+}
+
+#[test]
+fn heated_world_settles_and_sleeps() {
+    // A pool of lava under rock (an insulator) must not keep chunks awake.
+    let mut w = boxed(96, 96, 20);
+    for x in 0..96 {
+        for y in 80..95 {
+            w.set(x, y, id::LAVA);
+        }
+        for y in 70..80 {
+            w.set(x, y, id::ROCK);
+        }
+    }
+    run(&mut w, 600);
+    assert_eq!(w.awake_chunks(), 0);
+}
+
+#[test]
+fn reaction_table_is_symmetric_on_lookup() {
+    use crate::material::Outcome;
+    use crate::reaction::lookup;
+    let (a, b, _) = lookup(id::WATER, id::LAVA).unwrap();
+    assert_eq!(a, Outcome::Become(id::STEAM));
+    assert_eq!(b, Outcome::Become(id::OBSIDIAN));
+    assert!(lookup(id::ROCK, id::SAND).is_none());
+}

@@ -202,7 +202,7 @@ pub fn cave_level(width: u32, height: u32, seed: u32) -> Level {
     }
 
     // Let loose material settle so the level starts calm.
-    for _ in 0..200 {
+    for _ in 0..120 {
         world.step();
     }
     // The spawn ledge must stay clear even if something fell onto it.

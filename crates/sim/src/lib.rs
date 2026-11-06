@@ -3,12 +3,13 @@
 //! This crate has no web dependencies so it can be unit-tested natively.
 
 pub mod material;
+pub mod reaction;
 pub mod rng;
 pub mod world;
 pub mod worldgen;
 
 pub use material::{id, Kind, MATERIALS};
-pub use world::{Cell, World};
+pub use world::{Cell, Explosion, GpuCell, World};
 
 #[cfg(test)]
 mod tests;

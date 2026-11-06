@@ -1,16 +1,33 @@
-//! Rough timing of level generation and simulation: `cargo run --release -p physand-game --example bench`
+//! Rough timing of level generation and simulation, plus how much of the
+//! world stays active: `cargo run --release -p physand-game --example bench`
 use physand_game::{Game, Input};
+use physand_sim::id;
 use std::time::Instant;
 
 fn main() {
     let t = Instant::now();
-    let mut g = Game::new(12345);
+    let mut g = Game::new(2481860229);
     println!("level generation: {:?}", t.elapsed());
-    println!(
-        "awake chunks after gen: {}/{}",
-        g.world.awake_chunks(),
-        g.world.chunk_count()
-    );
+    let report = |g: &Game, label: &str| {
+        println!(
+            "{label}: awake {}/{} · glass {} · obsidian {} · lava {}",
+            g.world.awake_chunks(),
+            g.world.chunk_count(),
+            g.world.count(id::GLASS),
+            g.world.count(id::OBSIDIAN),
+            g.world.count(id::LAVA)
+        );
+    };
+    report(&g, "after gen");
+
+    let idle = Input::default();
+    let t = Instant::now();
+    for _ in 0..1800 {
+        g.set_input(idle);
+        g.step();
+    }
+    println!("idle step: {:?}/tick", t.elapsed() / 1800);
+    report(&g, "after 30s idle");
 
     let input = Input {
         right: true,
@@ -26,10 +43,6 @@ fn main() {
         g.step();
         g.render();
     }
-    let per = t.elapsed() / ticks;
-    println!(
-        "step+render: {per:?}/tick, awake chunks now: {}/{}",
-        g.world.awake_chunks(),
-        g.world.chunk_count()
-    );
+    println!("casting step+render: {:?}/tick", t.elapsed() / ticks);
+    report(&g, "after casting");
 }

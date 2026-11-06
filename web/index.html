@@ -14,8 +14,17 @@
           <div id="hud" aria-live="polite">
             <div class="bar" id="hp-bar"><span class="fill"></span><span class="label">HP</span></div>
             <div class="bar" id="stamina-bar"><span class="fill"></span><span class="label">Levitation</span></div>
-            <div class="bar" id="flask-bar"><span class="fill"></span><span class="label" id="flask-name">Flask</span></div>
+            <div id="flasks" role="radiogroup" aria-label="Flasks"></div>
+            <div id="flask-name"></div>
           </div>
+          <section id="spellcraft" hidden aria-label="Spellcraft">
+            <header>
+              <h2>Spellcraft</h2>
+              <button type="button" id="spellcraft-close" aria-label="Close">×</button>
+            </header>
+            <p class="hint">Combine 1–3 reagents, a form and up to 2 catalysts. The simulation does the rest.</p>
+            <div id="recipes"></div>
+          </section>
           <div id="banner" hidden>You dissolved.<small>Respawning…</small></div>
         </div>
       </div>
@@ -31,9 +40,10 @@
           </label>
           <button id="pause" type="button">Pause</button>
           <button id="reset" type="button" title="New level (R)">New level</button>
+          <button id="spellcraft-open" type="button" title="Edit flasks (C)">Spellcraft</button>
         </div>
         <div id="stats"></div>
-        <p id="help">A/D move · W/Space jump, hold to levitate or swim · Left click cast · Right click dig · Tab brush mode · P pause</p>
+        <p id="help">A/D move · W/Space jump, hold to levitate or swim · Left click cast · Right click dig · 1–4 / wheel flask · C spellcraft · Tab brush mode · P pause</p>
       </aside>
     </main>
     <script type="module" src="/src/main.ts"></script>
