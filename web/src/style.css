@@ -86,3 +86,83 @@ html, body {
 
 #stats { color: var(--muted); font-variant-numeric: tabular-nums; }
 #help { margin: 0; color: var(--muted); }
+
+/* ---- M1: screen, HUD, modes ---- */
+#screen { position: relative; }
+
+#screen.alchemist #view { cursor: none; }
+
+#hud {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: grid;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.bar {
+  position: relative;
+  width: 160px;
+  height: 14px;
+  font-size: 10px;
+  line-height: 14px;
+  background: #0009;
+  border: 1px solid #ffffff22;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.bar .fill {
+  position: absolute;
+  inset: 0;
+  transform-origin: left;
+  background: var(--bar, #fff);
+}
+
+.bar .label {
+  position: relative;
+  display: block;
+  padding-left: 6px;
+  color: #fff;
+  text-shadow: 0 1px 1px #000;
+  letter-spacing: 0.04em;
+}
+
+#hp-bar { --bar: #c8323c; }
+#stamina-bar { --bar: #6fb8d8; }
+#flask-bar { --bar: #306ed2; }
+
+#banner {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  font-size: 28px;
+  font-weight: 600;
+  color: #ffb08a;
+  background: #2a050588;
+  text-shadow: 0 2px 4px #000;
+  pointer-events: none;
+}
+
+#banner[hidden] { display: none; }
+#banner small { display: block; font-size: 14px; font-weight: 400; color: var(--text); }
+
+#modes { display: flex; gap: 4px; }
+
+#modes button {
+  font: inherit;
+  color: var(--text);
+  background: #221f2d;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+#modes button[aria-checked="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+
+#toolbar.alchemist #materials,
+#toolbar.alchemist #controls label { opacity: 0.45; }

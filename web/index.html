@@ -9,21 +9,31 @@
   <body>
     <main id="app">
       <div id="stage">
-        <canvas id="view"></canvas>
+        <div id="screen">
+          <canvas id="view"></canvas>
+          <div id="hud" aria-live="polite">
+            <div class="bar" id="hp-bar"><span class="fill"></span><span class="label">HP</span></div>
+            <div class="bar" id="stamina-bar"><span class="fill"></span><span class="label">Levitation</span></div>
+            <div class="bar" id="flask-bar"><span class="fill"></span><span class="label" id="flask-name">Flask</span></div>
+          </div>
+          <div id="banner" hidden>You dissolved.<small>Respawning…</small></div>
+        </div>
       </div>
       <aside id="toolbar">
-        <div id="materials" role="radiogroup" aria-label="Material"></div>
+        <div id="modes" role="radiogroup" aria-label="Mouse mode">
+          <button type="button" role="radio" data-mode="alchemist" title="Left: cast spell · Right: dig (Tab)">Alchemist</button>
+          <button type="button" role="radio" data-mode="brush" title="Left: paint · Right: erase (Tab)">Brush</button>
+        </div>
+        <div id="materials" role="radiogroup" aria-label="Brush material"></div>
         <div id="controls">
           <label>Brush <span id="brush-size">4</span>
             <input id="brush" type="range" min="1" max="24" value="4" />
           </label>
           <button id="pause" type="button">Pause</button>
-          <button id="step" type="button" title="Advance one tick (.)">Step</button>
-          <button id="reset" type="button" title="New random scene (R)">New scene</button>
-          <button id="clear" type="button">Clear</button>
+          <button id="reset" type="button" title="New level (R)">New level</button>
         </div>
         <div id="stats"></div>
-        <p id="help">Left-drag paint · Right-drag erase · Wheel brush size · 1–9/0 material · Space pause</p>
+        <p id="help">A/D move · W/Space jump, hold to levitate or swim · Left click cast · Right click dig · Tab brush mode · P pause</p>
       </aside>
     </main>
     <script type="module" src="/src/main.ts"></script>

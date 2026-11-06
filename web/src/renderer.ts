@@ -1,5 +1,6 @@
-// WebGL2 renderer: the wasm cell grid is uploaded each frame as an RGBA8
-// texture ([mat, var, life, clock]) and coloured in the fragment shader.
+// WebGL2 renderer. Each frame two view-sized RGBA8 textures are uploaded from
+// wasm memory: the visible cells ([mat, var, life, clock]), coloured in the
+// fragment shader, and an overlay (sprites, particles) composited on top.
 
 const VERT = `#version 300 es
 out vec2 v_uv;
@@ -13,8 +14,11 @@ void main() {
 const fragSource = (ids: MaterialIds, count: number) => `#version 300 es
 precision highp float;
 uniform sampler2D u_cells;
+uniform sampler2D u_overlay;
 uniform vec3 u_palette[${count}];
 uniform float u_time;
+uniform vec2 u_cam;   // world cell of the view's top-left corner
+uniform vec2 u_view;  // view size in cells
 in vec2 v_uv;
 out vec4 o_color;
 
@@ -30,15 +34,19 @@ void main() {
   int mat = int(c.r * 255.0 + 0.5);
   float v = c.g;                 // per-cell variation, 0..1
   float life = c.b * 255.0;
+  vec2 world = u_cam + v_uv * u_view;
 
-  // Cave backdrop.
-  vec3 col = mix(vec3(0.07, 0.06, 0.10), vec3(0.03, 0.03, 0.05), v_uv.y);
+  // Cave backdrop: dark, slightly mottled, deeper is darker.
+  float depth = clamp(world.y / 768.0, 0.0, 1.0);
+  float mottle = fract(sin(dot(floor(world / 6.0), vec2(12.9898, 78.233))) * 43758.5453);
+  vec3 bg = mix(vec3(0.075, 0.065, 0.10), vec3(0.035, 0.03, 0.045), depth) * (0.92 + 0.08 * mottle);
+  vec3 col = bg;
 
   if (mat != EMPTY) {
     col = u_palette[mat] * (0.88 + 0.24 * v);
   }
   if (mat == WATER) {
-    col *= 0.92 + 0.08 * sin(u_time * 3.0 + v * 6.2831 + v_uv.x * 80.0);
+    col *= 0.92 + 0.08 * sin(u_time * 3.0 + v * 6.2831 + world.x * 0.35);
   } else if (mat == FIRE) {
     // Hot yellow when fresh, deep red as it dies; embers glow orange.
     float t = clamp(life / 60.0, 0.0, 1.0);
@@ -49,9 +57,10 @@ void main() {
   } else if (mat == STEAM || mat == SMOKE) {
     // Gases fade out as they age.
     float a = clamp(life / 90.0, 0.25, 0.85);
-    vec3 bg = mix(vec3(0.07, 0.06, 0.10), vec3(0.03, 0.03, 0.05), v_uv.y);
     col = mix(bg, u_palette[mat] * (0.88 + 0.24 * v), a);
   }
+  vec4 over = texture(u_overlay, v_uv);
+  col = mix(col, over.rgb, over.a);
   o_color = vec4(col, 1.0);
 }`;
 
@@ -66,8 +75,10 @@ export interface MaterialIds {
 export class Renderer {
   private gl: WebGL2RenderingContext;
   private program: WebGLProgram;
-  private texture: WebGLTexture;
+  private cellTex: WebGLTexture;
+  private overlayTex: WebGLTexture;
   private uTime: WebGLUniformLocation | null;
+  private uCam: WebGLUniformLocation | null;
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -84,21 +95,16 @@ export class Renderer {
     gl.useProgram(this.program);
     gl.uniform3fv(gl.getUniformLocation(this.program, "u_palette"), palette);
     gl.uniform1i(gl.getUniformLocation(this.program, "u_cells"), 0);
+    gl.uniform1i(gl.getUniformLocation(this.program, "u_overlay"), 1);
+    gl.uniform2f(gl.getUniformLocation(this.program, "u_view"), width, height);
     this.uTime = gl.getUniformLocation(this.program, "u_time");
+    this.uCam = gl.getUniformLocation(this.program, "u_cam");
 
     // An empty VAO is required for attribute-less drawing.
     gl.bindVertexArray(gl.createVertexArray());
 
-    const tex = gl.createTexture();
-    if (!tex) throw new Error("Failed to create texture");
-    this.texture = tex;
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
+    this.cellTex = makeTexture(gl, 0, width, height);
+    this.overlayTex = makeTexture(gl, 1, width, height);
   }
 
   /** Fit the canvas to its container at an integer scale of the world size. */
@@ -114,14 +120,32 @@ export class Renderer {
     return scale;
   }
 
-  draw(cells: Uint8Array, timeSeconds: number): void {
+  draw(cells: Uint8Array, overlay: Uint8Array, camX: number, camY: number, timeSeconds: number): void {
     const gl = this.gl;
-    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.cellTex);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.width, this.height, gl.RGBA, gl.UNSIGNED_BYTE, cells);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.overlayTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.width, this.height, gl.RGBA, gl.UNSIGNED_BYTE, overlay);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.uniform1f(this.uTime, timeSeconds);
+    gl.uniform2f(this.uCam, camX, camY);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
+}
+
+function makeTexture(gl: WebGL2RenderingContext, unit: number, w: number, h: number): WebGLTexture {
+  const tex = gl.createTexture();
+  if (!tex) throw new Error("Failed to create texture");
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+  return tex;
 }
 
 function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {

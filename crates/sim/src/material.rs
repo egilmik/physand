@@ -44,6 +44,8 @@ pub struct Props {
     pub life: (u8, u8),
     /// Max horizontal cells a liquid may flow per tick.
     pub spread: u8,
+    /// Per-tick chance that a cell is removed while being dug (0 = undiggable).
+    pub dig: f32,
 }
 
 const fn p(
@@ -53,6 +55,7 @@ const fn p(
     color: [u8; 3],
     life: (u8, u8),
     spread: u8,
+    dig: f32,
 ) -> Props {
     Props {
         name,
@@ -61,21 +64,22 @@ const fn p(
         color,
         life,
         spread,
+        dig,
     }
 }
 
 pub const MATERIALS: [Props; 11] = [
-    p("Empty", Kind::Empty, 0, [0, 0, 0], (0, 0), 0),
-    p("Rock", Kind::Solid, 255, [92, 88, 96], (0, 0), 0),
-    p("Sand", Kind::Powder, 90, [214, 182, 110], (0, 0), 0),
-    p("Water", Kind::Liquid, 50, [48, 110, 210], (0, 0), 5),
-    p("Fire", Kind::Gas, 2, [255, 140, 40], (20, 60), 0),
-    p("Steam", Kind::Gas, 1, [200, 205, 215], (120, 240), 0),
-    p("Wood", Kind::Solid, 255, [120, 78, 44], (0, 0), 0),
-    p("Oil", Kind::Liquid, 40, [70, 52, 40], (0, 0), 4),
-    p("Lava", Kind::Liquid, 80, [235, 80, 20], (0, 0), 1),
-    p("Obsidian", Kind::Solid, 255, [40, 30, 56], (0, 0), 0),
-    p("Smoke", Kind::Gas, 1, [70, 68, 72], (40, 90), 0),
+    p("Empty", Kind::Empty, 0, [0, 0, 0], (0, 0), 0, 0.0),
+    p("Rock", Kind::Solid, 255, [92, 88, 96], (0, 0), 0, 0.04),
+    p("Sand", Kind::Powder, 90, [214, 182, 110], (0, 0), 0, 0.5),
+    p("Water", Kind::Liquid, 50, [48, 110, 210], (0, 0), 5, 0.0),
+    p("Fire", Kind::Gas, 2, [255, 140, 40], (20, 60), 0, 0.0),
+    p("Steam", Kind::Gas, 1, [200, 205, 215], (120, 240), 0, 0.0),
+    p("Wood", Kind::Solid, 255, [120, 78, 44], (0, 0), 0, 0.15),
+    p("Oil", Kind::Liquid, 40, [70, 52, 40], (0, 0), 4, 0.0),
+    p("Lava", Kind::Liquid, 80, [235, 80, 20], (0, 0), 1, 0.0),
+    p("Obsidian", Kind::Solid, 255, [40, 30, 56], (0, 0), 0, 0.0),
+    p("Smoke", Kind::Gas, 1, [70, 68, 72], (40, 90), 0, 0.0),
 ];
 
 #[inline]

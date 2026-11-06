@@ -3,6 +3,9 @@ use crate::rng::Rng;
 
 const NEIGHBOURS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
+/// Side length of a simulation chunk. Chunks with no activity sleep.
+pub const CHUNK: i32 = 32;
+
 /// Fire with more life than this is burning fuel (embers) and does not move.
 pub const EMBER_LIFE: u8 = 70;
 
@@ -46,24 +49,72 @@ impl Cell {
 }
 
 /// The falling-sand grid. `y = 0` is the top row.
+///
+/// The grid is divided into [`CHUNK`]-sized chunks. A chunk is only updated
+/// if something changed in it (or next to it) during the previous tick, so
+/// settled terrain costs nothing.
 pub struct World {
     width: i32,
     height: i32,
     cells: Vec<Cell>,
     rng: Rng,
     tick: u32,
+    chunks_w: i32,
+    chunks_h: i32,
+    /// Chunks to update this tick.
+    awake: Vec<bool>,
+    /// Chunks woken during this tick, to update next tick.
+    next_awake: Vec<bool>,
 }
 
 impl World {
     pub fn new(width: u32, height: u32, seed: u32) -> World {
         assert!(width > 0 && height > 0);
+        let chunks_w = (width as i32 + CHUNK - 1) / CHUNK;
+        let chunks_h = (height as i32 + CHUNK - 1) / CHUNK;
+        let n = (chunks_w * chunks_h) as usize;
         World {
             width: width as i32,
             height: height as i32,
             cells: vec![Cell::EMPTY; (width * height) as usize],
             rng: Rng::new(seed),
             tick: 0,
+            chunks_w,
+            chunks_h,
+            awake: vec![true; n],
+            next_awake: vec![true; n],
         }
+    }
+
+    /// Mark the chunk containing `(x, y)` for update next tick, plus the
+    /// neighbouring chunk(s) when the cell sits on a chunk border.
+    #[inline]
+    fn wake(&mut self, x: i32, y: i32) {
+        let (cx, cy) = (x / CHUNK, y / CHUNK);
+        let (lx, ly) = (x % CHUNK, y % CHUNK);
+        let x0 = if lx == 0 { cx - 1 } else { cx };
+        let x1 = if lx == CHUNK - 1 { cx + 1 } else { cx };
+        let y0 = if ly == 0 { cy - 1 } else { cy };
+        let y1 = if ly == CHUNK - 1 { cy + 1 } else { cy };
+        for ny in y0.max(0)..=y1.min(self.chunks_h - 1) {
+            for nx in x0.max(0)..=x1.min(self.chunks_w - 1) {
+                self.next_awake[(ny * self.chunks_w + nx) as usize] = true;
+            }
+        }
+    }
+
+    /// Number of chunks that will be simulated next tick (debug/perf HUD).
+    pub fn awake_chunks(&self) -> usize {
+        self.next_awake.iter().filter(|&&a| a).count()
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.next_awake.len()
+    }
+
+    /// Wake every chunk, e.g. after bulk edits.
+    pub fn wake_all(&mut self) {
+        self.next_awake.fill(true);
     }
 
     pub fn width(&self) -> u32 {
@@ -107,6 +158,39 @@ impl World {
             let c = Cell::new(mat, &mut self.rng);
             let i = self.idx(x, y);
             self.cells[i] = c;
+            self.wake(x, y);
+        }
+    }
+
+    /// Full cell at `(x, y)`, if in bounds.
+    #[inline]
+    pub fn cell(&self, x: i32, y: i32) -> Option<Cell> {
+        self.in_bounds(x, y).then(|| self.cells[self.idx(x, y)])
+    }
+
+    /// Copy a `w × h` window with its top-left at `(x0, y0)` into `out`
+    /// (row-major). Out-of-bounds cells read as rock.
+    pub fn copy_region(&self, x0: i32, y0: i32, w: i32, h: i32, out: &mut [Cell]) {
+        assert_eq!(out.len(), (w * h) as usize);
+        let rock = Cell {
+            mat: id::ROCK,
+            ..Cell::EMPTY
+        };
+        for row in 0..h {
+            let y = y0 + row;
+            let dst = &mut out[(row * w) as usize..((row + 1) * w) as usize];
+            if y < 0 || y >= self.height {
+                dst.fill(rock);
+                continue;
+            }
+            for (col, d) in dst.iter_mut().enumerate() {
+                let x = x0 + col as i32;
+                *d = if x >= 0 && x < self.width {
+                    self.cells[self.idx(x, y)]
+                } else {
+                    rock
+                };
+            }
         }
     }
 
@@ -129,6 +213,7 @@ impl World {
                 if mat == id::EMPTY {
                     let i = self.idx(x, y);
                     self.cells[i] = Cell::EMPTY;
+                    self.wake(x, y);
                 } else if self.get(x, y) == id::EMPTY && (solid || self.rng.chance(0.55)) {
                     self.set(x, y, mat);
                 }
@@ -138,6 +223,7 @@ impl World {
 
     pub fn clear(&mut self) {
         self.cells.fill(Cell::EMPTY);
+        self.wake_all();
     }
 
     /// Advance the simulation one step.
@@ -145,19 +231,38 @@ impl World {
         self.tick = self.tick.wrapping_add(1);
         let stamp = self.tick as u8;
         let left_to_right = self.tick & 1 == 0;
+        std::mem::swap(&mut self.awake, &mut self.next_awake);
+        self.next_awake.fill(false);
 
         // Bottom-to-top so falling material moves at most once per tick;
         // alternate horizontal direction to avoid directional bias.
         for y in (0..self.height).rev() {
-            for i in 0..self.width {
-                let x = if left_to_right { i } else { self.width - 1 - i };
-                let idx = self.idx(x, y);
-                let cell = self.cells[idx];
-                if cell.mat == id::EMPTY || cell.clock == stamp {
+            let cy = y / CHUNK;
+            for ci in 0..self.chunks_w {
+                let cx = if left_to_right {
+                    ci
+                } else {
+                    self.chunks_w - 1 - ci
+                };
+                if !self.awake[(cy * self.chunks_w + cx) as usize] {
                     continue;
                 }
-                self.cells[idx].clock = stamp;
-                self.update_cell(x, y, stamp);
+                let x_start = cx * CHUNK;
+                let x_end = (x_start + CHUNK).min(self.width);
+                for i in 0..(x_end - x_start) {
+                    let x = if left_to_right {
+                        x_start + i
+                    } else {
+                        x_end - 1 - i
+                    };
+                    let idx = self.idx(x, y);
+                    let cell = self.cells[idx];
+                    if cell.mat == id::EMPTY || cell.clock == stamp {
+                        continue;
+                    }
+                    self.cells[idx].clock = stamp;
+                    self.update_cell(x, y, stamp);
+                }
             }
         }
     }
@@ -206,6 +311,7 @@ impl World {
                 return next != id::EMPTY;
             }
             self.cells[i].life = life - 1;
+            self.wake(x, y);
         }
 
         if mat == id::FIRE {
@@ -280,6 +386,7 @@ impl World {
         let clock = self.cells[i].clock;
         self.cells[i] = Cell::new(mat, &mut self.rng);
         self.cells[i].clock = clock;
+        self.wake(x, y);
     }
 
     /// Swap `(x, y)` into `(nx, ny)` if allowed. Both cells are stamped.
@@ -294,6 +401,8 @@ impl World {
         self.cells.swap(a, b);
         self.cells[a].clock = stamp;
         self.cells[b].clock = stamp;
+        self.wake(x, y);
+        self.wake(nx, ny);
         true
     }
 

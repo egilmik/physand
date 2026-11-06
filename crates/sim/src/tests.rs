@@ -124,3 +124,61 @@ fn paint_and_erase() {
     w.paint(10, 10, 5, id::EMPTY);
     assert_eq!(w.count(id::ROCK), 0);
 }
+
+#[test]
+fn settled_world_goes_to_sleep() {
+    let mut w = World::new(128, 128, 9);
+    for x in 0..128 {
+        w.set(x, 127, id::ROCK);
+    }
+    w.paint(64, 20, 6, id::SAND);
+    run(&mut w, 400);
+    assert_eq!(
+        w.awake_chunks(),
+        0,
+        "nothing moves, so every chunk should sleep"
+    );
+    // Disturbing the world wakes only the affected area.
+    w.set(64, 0, id::SAND);
+    assert!(w.awake_chunks() > 0 && w.awake_chunks() < w.chunk_count());
+    run(&mut w, 300);
+    assert_eq!(w.awake_chunks(), 0);
+}
+
+#[test]
+fn sleeping_chunks_wake_when_neighbour_changes() {
+    // Sand resting on a block of sand that straddles a chunk border must fall
+    // once the support below is removed.
+    let mut w = World::new(64, 64, 10);
+    for y in 20..40 {
+        for x in 28..36 {
+            w.set(x, y, id::ROCK);
+        }
+    }
+    w.set(31, 19, id::SAND);
+    run(&mut w, 100);
+    assert_eq!(w.get(31, 19), id::SAND);
+    assert_eq!(w.awake_chunks(), 0);
+    for y in 20..40 {
+        for x in 28..36 {
+            w.set(x, y, id::EMPTY);
+        }
+    }
+    run(&mut w, 100);
+    assert_eq!(w.get(31, 63), id::SAND);
+}
+
+#[test]
+fn cave_level_is_deterministic_with_clear_spawn() {
+    let a = crate::worldgen::cave_level(384, 256, 77);
+    let b = crate::worldgen::cave_level(384, 256, 77);
+    assert!(a.world.cells() == b.world.cells());
+    let (sx, sy) = a.spawn;
+    assert_eq!(a.world.get(sx, sy + 1), id::ROCK, "spawn needs a floor");
+    for y in (sy - 12)..=sy {
+        for x in (sx - 3)..=(sx + 3) {
+            assert_eq!(a.world.get(x, y), id::EMPTY, "spawn blocked at ({x},{y})");
+        }
+    }
+    assert!(a.world.count(id::LAVA) > 0);
+}

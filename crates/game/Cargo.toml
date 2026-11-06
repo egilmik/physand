@@ -1,0 +1,9 @@
+[package]
+name = "physand-game"
+description = "Gameplay layer for Physand: player, spells, camera, rendering composition."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+physand-sim = { path = "../sim" }

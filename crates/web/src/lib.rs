@@ -1,58 +1,141 @@
-//! Browser bindings. The JS side owns the game loop, input and WebGL
-//! rendering; it reads the cell grid straight out of wasm memory.
+//! Browser bindings. JS owns the frame loop, input capture and WebGL; each
+//! frame it pushes input, advances fixed ticks, asks Rust to compose the
+//! view, then uploads the view and overlay buffers straight from wasm memory.
 
-use physand_sim::{worldgen, World, MATERIALS};
+use physand_game::{player, Game, Input, VIEW_H, VIEW_W};
+use physand_sim::MATERIALS;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
-pub struct Game {
-    world: World,
+pub struct Physand {
+    game: Game,
 }
 
 #[wasm_bindgen]
-impl Game {
+impl Physand {
     #[wasm_bindgen(constructor)]
-    pub fn new(width: u32, height: u32, seed: u32) -> Game {
-        Game {
-            world: worldgen::demo_scene(width, height, seed),
+    pub fn new(seed: u32) -> Physand {
+        Physand {
+            game: Game::new(seed),
         }
     }
 
-    pub fn width(&self) -> u32 {
-        self.world.width()
+    /// Generate a fresh level.
+    pub fn reset(&mut self, seed: u32) {
+        self.game = Game::new(seed);
     }
 
-    pub fn height(&self) -> u32 {
-        self.world.height()
+    /// Input bitmask (see `Input::LEFT` etc.) and aim in *view* cell coordinates.
+    pub fn set_input(&mut self, bits: u32, aim_view_x: f32, aim_view_y: f32) {
+        let (ax, ay) = self.game.view_to_world(aim_view_x, aim_view_y);
+        self.game.set_input(Input::from_bits(bits, ax, ay));
     }
 
-    /// Advance the simulation by `steps` fixed ticks.
+    /// Advance `steps` fixed ticks.
     pub fn tick(&mut self, steps: u32) {
         for _ in 0..steps {
-            self.world.step();
+            self.game.step();
         }
     }
 
-    pub fn paint(&mut self, x: i32, y: i32, radius: i32, mat: u8) {
-        self.world.paint(x, y, radius, mat);
+    /// Compose the current view into the view and overlay buffers.
+    pub fn render(&mut self) {
+        self.game.render();
     }
 
-    /// Regenerate the demo scene with a new seed.
-    pub fn reset(&mut self, seed: u32) {
-        self.world = worldgen::demo_scene(self.world.width(), self.world.height(), seed);
+    pub fn view_width(&self) -> u32 {
+        VIEW_W
     }
 
-    pub fn clear(&mut self) {
-        self.world.clear();
+    pub fn view_height(&self) -> u32 {
+        VIEW_H
     }
 
-    /// Pointer to `width * height` cells of 4 bytes `[mat, var, life, clock]`.
-    pub fn cells_ptr(&self) -> *const u8 {
-        self.world.cells().as_ptr() as *const u8
+    /// `VIEW_W * VIEW_H` cells of `[mat, var, life, clock]`.
+    pub fn view_ptr(&self) -> *const u8 {
+        self.game.view_cells().as_ptr() as *const u8
+    }
+
+    /// `VIEW_W * VIEW_H` RGBA8 overlay pixels (sprites, particles, UI marks).
+    pub fn overlay_ptr(&self) -> *const u8 {
+        self.game.overlay().as_ptr() as *const u8
+    }
+
+    pub fn camera_x(&self) -> i32 {
+        self.game.camera().0
+    }
+
+    pub fn camera_y(&self) -> i32 {
+        self.game.camera().1
+    }
+
+    /// Sandbox brush, in view coordinates.
+    pub fn paint(&mut self, view_x: i32, view_y: i32, radius: i32, mat: u8) {
+        self.game.paint_view(view_x, view_y, radius, mat);
+    }
+
+    // --- HUD -------------------------------------------------------------
+
+    pub fn hp(&self) -> f32 {
+        self.game.player.hp
+    }
+
+    pub fn max_hp(&self) -> f32 {
+        player::MAX_HP
+    }
+
+    pub fn stamina(&self) -> f32 {
+        self.game.player.stamina
+    }
+
+    pub fn max_stamina(&self) -> f32 {
+        player::MAX_STAMINA
+    }
+
+    pub fn flask_volume(&self) -> f32 {
+        self.game.flask.volume
+    }
+
+    pub fn flask_capacity(&self) -> f32 {
+        self.game.flask.capacity
+    }
+
+    pub fn flask_name(&self) -> String {
+        self.game.flask.name.to_string()
+    }
+
+    pub fn flask_material(&self) -> u8 {
+        self.game.flask.material
+    }
+
+    pub fn is_dead(&self) -> bool {
+        !self.game.player.alive()
+    }
+
+    pub fn deaths(&self) -> u32 {
+        self.game.deaths
+    }
+
+    // --- Debug -------------------------------------------------------------
+
+    pub fn player_x(&self) -> i32 {
+        self.game.player.x
+    }
+
+    pub fn player_y(&self) -> i32 {
+        self.game.player.y
     }
 
     pub fn count(&self, mat: u8) -> u32 {
-        self.world.count(mat) as u32
+        self.game.world.count(mat) as u32
+    }
+
+    pub fn awake_chunks(&self) -> u32 {
+        self.game.world.awake_chunks() as u32
+    }
+
+    pub fn chunk_count(&self) -> u32 {
+        self.game.world.chunk_count() as u32
     }
 }
 
