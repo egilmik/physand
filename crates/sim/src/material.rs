@@ -21,6 +21,8 @@ pub mod id {
     pub const ICE: u8 = 12;
     pub const GUNPOWDER: u8 = 13;
     pub const GLASS: u8 = 14;
+    pub const SANDSTONE: u8 = 15;
+    pub const WAX: u8 = 16;
 }
 
 /// Temperature of the cave air. Temperatures are abstract `u8` units:
@@ -50,6 +52,9 @@ pub enum Outcome {
     Become(u8),
     /// Become another material with the given probability, else stay.
     BecomeChance(u8, f32),
+    /// Become another material at that material's base temperature (a phase
+    /// change normally keeps the temperature).
+    BecomeFresh(u8),
     /// Catch fire as long-burning fuel (stationary embers).
     Ignite,
     /// Detonate.
@@ -100,7 +105,7 @@ const BASE: Props = Props {
     reagent: false,
 };
 
-pub const MATERIALS: [Props; 15] = [
+pub const MATERIALS: [Props; 17] = [
     Props {
         name: "Empty",
         kind: Kind::Empty,
@@ -251,6 +256,24 @@ pub const MATERIALS: [Props; 15] = [
         dig: 0.08,
         conduct: 0.2,
         air_cool: 0.25,
+        ..BASE
+    },
+    // Catacomb masonry: softer than rock, an insulator, eaten by acid.
+    Props {
+        name: "Sandstone",
+        color: [184, 140, 92],
+        dig: 0.12,
+        ..BASE
+    },
+    // Ancient seal over each floor's descent. Nothing breaks it except heat,
+    // which melts it into oil.
+    Props {
+        name: "Wax",
+        color: [178, 48, 52],
+        conduct: 0.3,
+        air_cool: 0.1,
+        // Molten wax is plain, cool oil: it only burns if you bring fire.
+        on_hot: Some((100, Outcome::BecomeFresh(id::OIL))),
         ..BASE
     },
 ];

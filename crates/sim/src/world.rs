@@ -557,7 +557,7 @@ impl World {
     fn apply(&mut self, x: i32, y: i32, outcome: Outcome) -> bool {
         match outcome {
             Outcome::Keep => false,
-            Outcome::Become(m) => {
+            Outcome::Become(m) | Outcome::BecomeFresh(m) => {
                 self.replace(x, y, m);
                 true
             }

@@ -138,17 +138,52 @@ html, body {
   inset: 0;
   display: grid;
   place-content: center;
+  justify-items: center;
+  gap: 8px;
   text-align: center;
-  font-size: 28px;
-  font-weight: 600;
-  color: #ffb08a;
-  background: #2a050588;
+  background: #0a0812b8;
   text-shadow: 0 2px 4px #000;
-  pointer-events: none;
+  z-index: 3;
 }
 
 #banner[hidden] { display: none; }
-#banner small { display: block; font-size: 14px; font-weight: 400; color: var(--text); }
+#banner h2 { margin: 0; font-size: 28px; color: var(--accent); }
+#banner.dead h2 { color: #ff8a70; }
+#banner p { margin: 0; color: var(--text); font-size: 14px; line-height: 1.6; }
+
+#banner button {
+  font: inherit;
+  font-size: 15px;
+  color: #1a1206;
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  padding: 8px 18px;
+  cursor: pointer;
+}
+
+#run-info {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  text-align: right;
+  pointer-events: none;
+  max-width: 50%;
+}
+
+#run-stats {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  text-shadow: 0 1px 2px #000;
+}
+
+#objective {
+  margin-top: 3px;
+  font-size: 11px;
+  color: #ffcd5a;
+  text-shadow: 0 1px 2px #000;
+}
 
 #modes { display: flex; gap: 4px; }
 

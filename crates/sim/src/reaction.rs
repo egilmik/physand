@@ -96,6 +96,13 @@ pub const REACTIONS: &[Reaction] = &[
         BecomeChance(id::SMOKE, 0.3),
         Become(id::EMPTY),
     ),
+    r(
+        id::ACID,
+        id::SANDSTONE,
+        0.08,
+        BecomeChance(id::SMOKE, 0.3),
+        Become(id::EMPTY),
+    ),
     r(id::ACID, id::WATER, 0.01, Become(id::WATER), Keep),
 ];
 

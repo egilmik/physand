@@ -163,6 +163,15 @@ impl Payload {
 // Particles
 // ---------------------------------------------------------------------------
 
+/// Result of advancing a particle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flight {
+    Flying,
+    Landed,
+    /// Struck the creature with this index (and landed).
+    HitCreature(usize),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParticleKind {
     Droplet,
@@ -192,10 +201,10 @@ fn passable(mat: u8) -> bool {
     mat == id::EMPTY || kind(mat) == Kind::Gas
 }
 
-/// Spells cannot alter obsidian: it is the one reliable ward.
+/// Spells cannot alter obsidian (the one reliable ward) or wax seals.
 #[inline]
 fn transmutable(mat: u8, into: u8) -> bool {
-    mat != id::EMPTY && mat != id::OBSIDIAN && mat != into && kind(mat) != Kind::Gas
+    !matches!(mat, id::EMPTY | id::OBSIDIAN | id::WAX) && mat != into && kind(mat) != Kind::Gas
 }
 
 impl Particle {
@@ -208,8 +217,14 @@ impl Particle {
         self.mats[(rng.next_u32() % self.n_mats as u32) as usize]
     }
 
-    /// Advance one tick. Returns `false` once it has landed (or expired).
-    pub fn update(&mut self, world: &mut World, rng: &mut Rng) -> bool {
+    /// Advance one tick. `hit_creature` reports which creature (if any)
+    /// occupies a point; a particle striking one lands there.
+    pub fn update(
+        &mut self,
+        world: &mut World,
+        rng: &mut Rng,
+        hit_creature: impl Fn(f32, f32) -> Option<usize>,
+    ) -> Flight {
         self.vy += self.gravity;
         self.life += 1;
         // Sub-step so fast particles never tunnel through thin walls.
@@ -217,19 +232,23 @@ impl Particle {
         let (sx, sy) = (self.vx / steps as f32, self.vy / steps as f32);
         for _ in 0..steps {
             let (nx, ny) = (self.x + sx, self.y + sy);
+            if let Some(i) = hit_creature(nx, ny) {
+                self.land(world, rng, None);
+                return Flight::HitCreature(i);
+            }
             let hit = (nx.floor() as i32, ny.floor() as i32);
             if !passable(world.get(hit.0, hit.1)) {
                 self.land(world, rng, Some(hit));
-                return false;
+                return Flight::Landed;
             }
             self.x = nx;
             self.y = ny;
         }
         if self.life >= PARTICLE_MAX_LIFE {
             self.land(world, rng, None);
-            return false;
+            return Flight::Landed;
         }
-        true
+        Flight::Flying
     }
 
     /// Resolve the impact. `hit` is the solid cell struck, if any.
@@ -482,13 +501,15 @@ impl Flask {
 
         match self.form {
             Form::Spray => {
+                let (speed, gravity) = (3.2, 0.06);
+                let arc = ballistic_angle(tx - ox, ty - oy, speed, gravity);
                 for _ in 0..4 {
                     if !self.spend() {
                         break;
                     }
-                    let angle = aim + (ctx.rng.f32() * 2.0 - 1.0) * 0.10;
-                    let speed = 3.2 * (0.85 + 0.3 * ctx.rng.f32());
-                    let p = self.droplet(ox, oy, angle.cos() * speed, angle.sin() * speed, 0.06);
+                    let angle = arc + (ctx.rng.f32() * 2.0 - 1.0) * 0.08;
+                    let v = speed * (0.93 + 0.14 * ctx.rng.f32());
+                    let p = self.droplet(ox, oy, angle.cos() * v, angle.sin() * v, gravity);
                     ctx.particles.push(p);
                 }
             }
@@ -512,19 +533,20 @@ impl Flask {
                 if !self.spend() {
                     return;
                 }
-                let speed = 2.8;
+                let (speed, gravity) = (2.8, 0.035);
+                let arc = ballistic_angle(tx - ox, ty - oy, speed, gravity);
                 let mut mats = [self.reagents[0]; MAX_REAGENTS];
                 mats[..self.reagents.len()].copy_from_slice(&self.reagents);
                 ctx.particles.push(Particle {
                     x: ox,
                     y: oy,
-                    vx: aim.cos() * speed,
-                    vy: aim.sin() * speed,
+                    vx: arc.cos() * speed,
+                    vy: arc.sin() * speed,
                     kind: ParticleKind::Orb,
                     mats,
                     n_mats: self.reagents.len() as u8,
                     payload: Payload::from_catalysts(&self.catalysts),
-                    gravity: 0.035,
+                    gravity,
                     life: 0,
                 });
             }
@@ -569,6 +591,32 @@ impl Flask {
             }
         }
     }
+}
+
+/// Launch angle (screen coordinates, y down) that lands a projectile with
+/// speed `v` and gravity `g` on the point `(dx, dy)` away, taking the flatter
+/// of the two arcs. Out of range, it lobs at 45° toward the target.
+pub fn ballistic_angle(dx: f32, dy: f32, v: f32, g: f32) -> f32 {
+    let dist = dx.abs().max(0.001);
+    let up = -dy; // physics convention: positive is up
+    let v2 = v * v;
+    let disc = v2 * v2 - g * (g * dist * dist + 2.0 * up * v2);
+    let elevation = if disc >= 0.0 {
+        ((v2 - disc.sqrt()) / (g * dist)).atan()
+    } else {
+        std::f32::consts::FRAC_PI_4
+    };
+    // Convert to screen space: mirror for leftward shots, flip y.
+    let (cx, cy) = (elevation.cos() * dx.signum(), -elevation.sin());
+    if dx == 0.0 {
+        // Straight up or down.
+        return if dy < 0.0 {
+            -std::f32::consts::FRAC_PI_2
+        } else {
+            std::f32::consts::FRAC_PI_2
+        };
+    }
+    cy.atan2(cx)
 }
 
 /// The y just below the first solid cell above `(x, y)`, searching up to `max` cells.

@@ -6,11 +6,29 @@ Rust → WebAssembly simulation, WebGL2 rendering.
 
 See [docs/CONCEPT.md](docs/CONCEPT.md) for the game concept and roadmap.
 
-## Status: M2 — the spell system
+## Status: M3 — first playable floor
 
-Explore a procedurally generated 1024×768 cave as the alchemist, crafting
-spells from materials. Caves have sand veins (which collapse when you dig
-under them), water and oil pockets, wooden scaffolding and a lava lake.
+Descend through the **Dune Catacombs** as the alchemist. Each floor is
+generated from a seed: a winding route links sandstone burial rooms full of
+dunes, oil pools and *sand traps* (sand held up by wooden beams — burn or dig
+them and it all comes down), with a lava lake at the bottom. Somewhere below
+lies an obsidian vault whose shaft is closed by an **ancient wax seal**.
+Nothing breaks wax — not digging, acid, explosions or transmutation — but heat
+melts it into oil. Melt a way through, drop into the rift, and descend to a
+harder floor. An arrow at the screen edge points to the seal, then the rift.
+
+Death is permanent: the run ends and you start again on a fresh floor 1.
+
+### Creatures
+
+| Creature | Behaviour | Material weaknesses |
+|----------|-----------|---------------------|
+| **Scarab** | Wanders, chases on sight, hops over obstacles | Burns — and a burning scarab lights the fuel it runs past; acid; frost freezes it |
+| **Dust Wraith** | Drifts, then swoops at you through the air | Fire; drowns in any liquid; frozen wraiths drop like stones |
+| **Sand Golem** | Slow, tough guardian of the catacomb rooms | Water erodes it, acid eats it (×2.5), enough heat bakes it into a glass statue; slain golems collapse into real sand |
+
+Spells hit creatures directly; explosions hurt and knock back everything
+(including you). Spray and Orb spells arc so they land where you click.
 
 ### Spellcraft
 
@@ -56,12 +74,15 @@ and knock back the player. Hot cells glow and frozen cells frost over.
 | Wood | Static fuel; burns as stationary embers |
 | Steam / Smoke | Rise and dissipate; steam condenses back into water |
 | Rock / Obsidian | Static insulating solids (rock is slowly diggable, obsidian immune to spells) |
+| Sandstone | Catacomb masonry: diggable, eaten by acid |
+| Wax | Floor seals: immune to everything except heat, which melts it into oil |
 
 **Controls:** `A`/`D` move · `W`/`Space` jump (hold to levitate or swim) ·
 left click cast · right click dig · `1`–`4` or mouse wheel select flask ·
-`C` spellcraft · `Tab` brush mode · `P` pause · `R` new level.
+`C` spellcraft · `Enter` descend after clearing a floor · `R` new run ·
+`Tab` brush mode · `P` pause.
 In brush mode: left paint, right erase, wheel or `[` `]` brush size, number keys pick material.
-Add `?seed=123` to the URL to replay a level.
+Add `?seed=123` to the URL to replay a run's first floor.
 
 The simulation only updates 32×32 chunks where something changed recently (or
 where a reaction is still possible), so settled terrain is free; a typical tick
@@ -91,7 +112,8 @@ unoptimised build) and reload the page. `npm run build` produces a static site i
 
 ```
 crates/sim/   Simulation core: materials, chunked cell grid, reactions, worldgen (pure Rust, unit-tested)
-crates/game/  Gameplay: player controller, spells/particles, camera, frame composition (unit-tested)
+crates/game/  Gameplay: run/floor flow, player and enemies (shared body physics), spells,
+              camera, frame composition (unit-tested)
 crates/web/   wasm-bindgen glue exposing the game to JS
 web/          Vite + TypeScript front end: game loop, input, WebGL2 renderer, UI
 scripts/      Build helpers

@@ -157,6 +157,9 @@ async function main() {
       togglePause();
     } else if (e.code === "KeyR") {
       newLevel();
+    } else if (e.code === "Enter" && game.phase() === 2) {
+      e.preventDefault();
+      advance();
     } else if (e.code === "KeyC") {
       toggleSpellcraft();
     } else if (e.code === "Escape" && !spellcraft.hidden) {
@@ -250,6 +253,17 @@ async function main() {
   const hpFill = $<HTMLSpanElement>("#hp-bar .fill");
   const staminaFill = $<HTMLSpanElement>("#stamina-bar .fill");
   const banner = $<HTMLDivElement>("#banner");
+  const bannerTitle = $<HTMLHeadingElement>("#banner-title");
+  const bannerStats = $<HTMLParagraphElement>("#banner-stats");
+  const bannerAction = $<HTMLButtonElement>("#banner-action");
+  const runStats = $<HTMLDivElement>("#run-stats");
+  const objective = $<HTMLDivElement>("#objective");
+  const clock = (secs: number) => {
+    const s = Math.floor(secs);
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  };
+  let shownPhase = -1;
+  bannerAction.addEventListener("click", () => advance());
   const flaskName = $<HTMLDivElement>("#flask-name");
   const hexColor = (c: number) => `#${c.toString(16).padStart(6, "0")}`;
 
@@ -282,8 +296,49 @@ async function main() {
     });
     const name = game.flask_name(active);
     if (flaskName.textContent !== name) flaskName.textContent = name;
-    banner.hidden = !game.is_dead();
+
+    setText(
+      runStats,
+      `Floor ${game.depth()} · ${game.kills()} slain · ${clock(game.run_seconds())}`,
+    );
+    setText(
+      objective,
+      game.seal_open()
+        ? "The seal is breached — enter the rift below"
+        : "Find the wax seal at the bottom (follow the arrow). Heat melts wax.",
+    );
+
+    // Run over / floor cleared screens.
+    const phase = game.phase();
+    if (phase !== shownPhase) {
+      shownPhase = phase;
+      banner.hidden = phase === 0;
+      banner.classList.toggle("dead", phase === 1);
+      if (phase === 1) {
+        bannerTitle.textContent = "The catacombs claim you";
+        bannerStats.innerHTML =
+          `Reached floor ${game.depth()} · ${game.kills()} creatures slain · ${clock(game.run_seconds())}`;
+        bannerAction.textContent = "New run (R)";
+      } else if (phase === 2) {
+        bannerTitle.textContent = `Floor ${game.depth()} cleared`;
+        bannerStats.innerHTML =
+          `Floor time ${clock(game.floor_seconds())} · ${game.kills()} slain so far` +
+          `<br>Descending restores some health and refills your flasks.`;
+        bannerAction.textContent = "Descend (Enter)";
+      }
+      if (phase !== 0) bannerAction.focus({ preventScroll: true });
+    }
   };
+  const setText = (el: HTMLElement, text: string) => {
+    if (el.textContent !== text) el.textContent = text;
+  };
+  /** Banner action: descend after a clear, or start over after death. */
+  function advance() {
+    const phase = game.phase();
+    if (phase === 2) game.descend();
+    else if (phase === 1) newLevel();
+    renderRecipes();
+  }
 
   // ---- Spellcraft ------------------------------------------------------------
   const spellcraft = $<HTMLElement>("#spellcraft");

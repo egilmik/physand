@@ -10,9 +10,10 @@ fn main() {
     println!("level generation: {:?}", t.elapsed());
     let report = |g: &Game, label: &str| {
         println!(
-            "{label}: awake {}/{} · glass {} · obsidian {} · lava {}",
+            "{label}: awake {}/{} · enemies {} · glass {} · obsidian {} · lava {}",
             g.world.awake_chunks(),
             g.world.chunk_count(),
+            g.enemies_alive(),
             g.world.count(id::GLASS),
             g.world.count(id::OBSIDIAN),
             g.world.count(id::LAVA)

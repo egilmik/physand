@@ -358,3 +358,102 @@ fn reaction_table_is_symmetric_on_lookup() {
     assert_eq!(b, Outcome::Become(id::OBSIDIAN));
     assert!(lookup(id::ROCK, id::SAND).is_none());
 }
+
+// ---- M3: Dune Catacombs floor ----------------------------------------------
+
+/// Flood-fill from `start` through cells for which `open` holds.
+fn reachable(w: &World, start: (i32, i32), open: impl Fn(u8) -> bool) -> Vec<bool> {
+    let (ww, wh) = (w.width() as i32, w.height() as i32);
+    let mut seen = vec![false; (ww * wh) as usize];
+    let mut stack = vec![start];
+    while let Some((x, y)) = stack.pop() {
+        if x < 0 || y < 0 || x >= ww || y >= wh {
+            continue;
+        }
+        let i = (y * ww + x) as usize;
+        if seen[i] || !open(w.get(x, y)) {
+            continue;
+        }
+        seen[i] = true;
+        stack.extend([(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]);
+    }
+    seen
+}
+
+#[test]
+fn dune_floor_route_reaches_the_seal_and_only_the_seal_guards_the_exit() {
+    use crate::worldgen::dune_catacombs;
+    for seed in [1, 7, 42, 1234, 99999] {
+        let level = dune_catacombs(1024, 768, seed);
+        let w = &level.world;
+        let seal = level.seal.unwrap();
+        let exit = level.exit.unwrap();
+        let ww = w.width() as i32;
+        let start = (level.spawn.0, level.spawn.1 - 2);
+
+        // Walkable or quickly diggable (sand, wood, liquids other than lava).
+        let soft = |m: u8| {
+            !matches!(
+                m,
+                id::ROCK | id::SANDSTONE | id::OBSIDIAN | id::WAX | id::LAVA
+            )
+        };
+        let seen = reachable(w, start, soft);
+        let above_seal = (seal.x + seal.w / 2, seal.y - 1);
+        assert!(
+            seen[(above_seal.1 * ww + above_seal.0) as usize],
+            "seed {seed}: no soft route from spawn to the seal"
+        );
+        let (ex, ey) = exit.center();
+        assert!(
+            !seen[(ey * ww + ex) as usize],
+            "seed {seed}: exit reachable without the seal"
+        );
+
+        // Melting the wax opens the way.
+        let through_wax = reachable(w, start, |m| soft(m) || m == id::WAX);
+        assert!(
+            through_wax[(ey * ww + ex) as usize],
+            "seed {seed}: seal does not lead to the exit"
+        );
+
+        assert!(
+            level.ground_spots.len() >= 15,
+            "seed {seed}: {} ground spots",
+            level.ground_spots.len()
+        );
+        assert!(
+            level.air_spots.len() >= 8,
+            "seed {seed}: {} air spots",
+            level.air_spots.len()
+        );
+        assert!(!level.room_spots.is_empty(), "seed {seed}: no room spots");
+    }
+}
+
+#[test]
+fn wax_resists_everything_but_heat() {
+    let mut w = World::new(30, 30, 21);
+    for x in 5..25 {
+        for y in 10..16 {
+            w.set(x, y, id::WAX);
+        }
+    }
+    let wax = w.count(id::WAX);
+    w.explode(15, 8, 6);
+    for x in 5..25 {
+        w.set(x, 9, id::ACID);
+    }
+    run(&mut w, 300);
+    assert_eq!(
+        w.count(id::WAX),
+        wax,
+        "explosions and acid leave wax intact"
+    );
+    for x in 5..25 {
+        w.add_temp(x, 10, 120);
+    }
+    run(&mut w, 5);
+    assert!(w.count(id::WAX) < wax, "heat melts wax");
+    assert!(w.count(id::OIL) > 0, "molten wax becomes oil");
+}

@@ -17,6 +17,10 @@
             <div id="flasks" role="radiogroup" aria-label="Flasks"></div>
             <div id="flask-name"></div>
           </div>
+          <div id="run-info" aria-live="polite">
+            <div id="run-stats"></div>
+            <div id="objective"></div>
+          </div>
           <section id="spellcraft" hidden aria-label="Spellcraft">
             <header>
               <h2>Spellcraft</h2>
@@ -25,7 +29,11 @@
             <p class="hint">Combine 1–3 reagents, a form and up to 2 catalysts. The simulation does the rest.</p>
             <div id="recipes"></div>
           </section>
-          <div id="banner" hidden>You dissolved.<small>Respawning…</small></div>
+          <div id="banner" hidden role="dialog" aria-modal="false">
+            <h2 id="banner-title"></h2>
+            <p id="banner-stats"></p>
+            <button type="button" id="banner-action"></button>
+          </div>
         </div>
       </div>
       <aside id="toolbar">
@@ -39,11 +47,11 @@
             <input id="brush" type="range" min="1" max="24" value="4" />
           </label>
           <button id="pause" type="button">Pause</button>
-          <button id="reset" type="button" title="New level (R)">New level</button>
+          <button id="reset" type="button" title="Start a new run (R)">New run</button>
           <button id="spellcraft-open" type="button" title="Edit flasks (C)">Spellcraft</button>
         </div>
         <div id="stats"></div>
-        <p id="help">A/D move · W/Space jump, hold to levitate or swim · Left click cast · Right click dig · 1–4 / wheel flask · C spellcraft · Tab brush mode · P pause</p>
+        <p id="help">A/D move · W/Space jump, hold to levitate or swim · Left click cast · Right click dig · 1–4 / wheel flask · C spellcraft · Tab brush mode · P pause · Find the wax seal at the bottom and melt it to descend</p>
       </aside>
     </main>
     <script type="module" src="/src/main.ts"></script>

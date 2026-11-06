@@ -24,9 +24,55 @@ impl Physand {
         }
     }
 
-    /// Generate a fresh level.
+    /// Start a new run (floor 1) with this seed.
     pub fn reset(&mut self, seed: u32) {
         self.game = Game::new(seed);
+    }
+
+    // --- Run state -----------------------------------------------------------
+
+    /// 0 = playing, 1 = dead (run over), 2 = floor cleared.
+    pub fn phase(&self) -> u8 {
+        self.game.phase.code()
+    }
+
+    /// Enter the next floor after clearing this one. Returns `false` otherwise.
+    pub fn descend(&mut self) -> bool {
+        self.game.descend()
+    }
+
+    pub fn depth(&self) -> u32 {
+        self.game.depth
+    }
+
+    pub fn kills(&self) -> u32 {
+        self.game.kills
+    }
+
+    /// Seconds played this run (60 ticks per second).
+    pub fn run_seconds(&self) -> f32 {
+        self.game.run_ticks as f32 / 60.0
+    }
+
+    pub fn floor_seconds(&self) -> f32 {
+        self.game.floor_ticks as f32 / 60.0
+    }
+
+    pub fn enemies_alive(&self) -> u32 {
+        self.game.enemies_alive() as u32
+    }
+
+    pub fn seal_open(&self) -> bool {
+        self.game.seal_open()
+    }
+
+    /// World position the compass points at (seal, then exit); NaN if none.
+    pub fn objective_x(&self) -> f32 {
+        self.game.objective().map_or(f32::NAN, |o| o.0)
+    }
+
+    pub fn objective_y(&self) -> f32 {
+        self.game.objective().map_or(f32::NAN, |o| o.1)
     }
 
     /// Input bitmask (see `Input::LEFT` etc.) and aim in *view* cell coordinates.
@@ -182,6 +228,16 @@ impl Physand {
     }
 
     // --- Debug -------------------------------------------------------------
+
+    /// Debug: teleport next to the floor's seal.
+    pub fn debug_warp_to_seal(&mut self) {
+        self.game.debug_warp_to_seal();
+    }
+
+    /// Debug: end the run.
+    pub fn debug_kill(&mut self) {
+        self.game.player.kill();
+    }
 
     pub fn player_x(&self) -> i32 {
         self.game.player.x

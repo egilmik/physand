@@ -1,17 +1,19 @@
-//! Top-level game state: world, player, spell particles and camera.
+//! Top-level game state: the run, the current floor, the player, enemies,
+//! spell particles and camera.
 
 use physand_sim::{
     id,
     material::props,
     rng::Rng,
-    worldgen::{cave_level, Level},
+    worldgen::{dune_catacombs, Level, Rect},
     GpuCell, World,
 };
 
+use crate::enemy::{Enemy, EnemyEvent, EnemyKind, BAKE_TEMP};
 use crate::input::Input;
 use crate::player::{Player, PLAYER_H, PLAYER_W};
-use crate::render::{Overlay, Rgba};
-use crate::spell::{starter_flasks, CastCtx, Catalyst, Flask, Particle, ParticleKind};
+use crate::render::{self, Overlay, Rgba, Tint};
+use crate::spell::{starter_flasks, CastCtx, Catalyst, Flask, Flight, Particle, ParticleKind};
 
 pub const WORLD_W: u32 = 1024;
 pub const WORLD_H: u32 = 768;
@@ -27,14 +29,39 @@ const CAMERA_LOOKAHEAD: f32 = 0.2;
 /// Most damage the player can take from explosions in a single tick, so a
 /// chain reaction of tiny blasts is not instantly lethal.
 const MAX_BLAST_DAMAGE_PER_TICK: f32 = 25.0;
+/// HP restored when descending to a new floor.
+const DESCEND_HEAL: f32 = 30.0;
+
+/// Where the run stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    Playing,
+    /// The alchemist died; the run is over.
+    Dead,
+    /// Reached the floor's exit.
+    Cleared,
+}
+
+impl Phase {
+    pub fn code(self) -> u8 {
+        match self {
+            Phase::Playing => 0,
+            Phase::Dead => 1,
+            Phase::Cleared => 2,
+        }
+    }
+}
 
 pub struct Game {
     pub world: World,
     pub player: Player,
     pub flasks: Vec<Flask>,
+    pub enemies: Vec<Enemy>,
     active_flask: usize,
     particles: Vec<Particle>,
-    spawn: (i32, i32),
+    exit: Option<Rect>,
+    seal: Option<Rect>,
+    seal_open: bool,
     input: Input,
     prev_jump: bool,
     rng: Rng,
@@ -42,29 +69,37 @@ pub struct Game {
     cam_y: f32,
     view_cells: Vec<GpuCell>,
     overlay: Vec<Rgba>,
+    pub phase: Phase,
+    run_seed: u32,
+    /// Floor number, starting at 1.
+    pub depth: u32,
+    pub kills: u32,
+    /// Ticks spent playing this run / this floor.
+    pub run_ticks: u32,
+    pub floor_ticks: u32,
+    /// Deaths this run (0 or 1 with permadeath; kept for stats).
     pub deaths: u32,
 }
 
 impl Game {
+    /// Start a new run on floor 1.
     pub fn new(seed: u32) -> Game {
-        Self::with_size(WORLD_W, WORLD_H, seed)
+        Self::from_level(dune_catacombs(WORLD_W, WORLD_H, seed), seed)
     }
 
-    pub fn with_size(width: u32, height: u32, seed: u32) -> Game {
-        Self::from_level(cave_level(width, height, seed), seed)
-    }
-
-    /// Start on a prepared level (used by tests and, later, by floor transitions).
+    /// Start on a prepared level (tests and sandboxes). Enemies are placed at
+    /// the level's spawn spots, if it has any.
     pub fn from_level(level: Level, seed: u32) -> Game {
-        let Level { world, spawn } = level;
-        let player = Player::new(spawn.0, spawn.1);
         let mut game = Game {
-            world,
-            player,
+            world: World::new(1, 1, seed),
+            player: Player::new(level.spawn.0, level.spawn.1),
             flasks: starter_flasks(),
+            enemies: Vec::new(),
             active_flask: 0,
             particles: Vec::new(),
-            spawn,
+            exit: None,
+            seal: None,
+            seal_open: false,
             input: Input::default(),
             prev_jump: false,
             rng: Rng::new(seed ^ 0x5EED_0001),
@@ -72,12 +107,106 @@ impl Game {
             cam_y: 0.0,
             view_cells: vec![[0; 4]; (VIEW_W * VIEW_H) as usize],
             overlay: vec![[0; 4]; (VIEW_W * VIEW_H) as usize],
+            phase: Phase::Playing,
+            run_seed: seed,
+            depth: 1,
+            kills: 0,
+            run_ticks: 0,
+            floor_ticks: 0,
             deaths: 0,
         };
-        let (tx, ty) = game.camera_target();
-        game.cam_x = tx;
-        game.cam_y = ty;
+        game.enter_floor(level);
         game
+    }
+
+    /// Install a floor: world, markers, enemies, player at the spawn.
+    fn enter_floor(&mut self, level: Level) {
+        let Level {
+            world,
+            spawn,
+            exit,
+            seal,
+            ground_spots,
+            air_spots,
+            room_spots,
+        } = level;
+        self.world = world;
+        self.exit = exit;
+        self.seal = seal;
+        self.seal_open = seal.is_none();
+        self.particles.clear();
+        self.floor_ticks = 0;
+        self.phase = Phase::Playing;
+
+        let hp = self.player.hp;
+        let stamina = self.player.stamina;
+        self.player = Player::new(spawn.0, spawn.1);
+        self.player.hp = hp;
+        self.player.stamina = stamina;
+
+        self.enemies = self.populate(&ground_spots, &air_spots, &room_spots);
+
+        let (tx, ty) = self.camera_target();
+        self.cam_x = tx;
+        self.cam_y = ty;
+    }
+
+    /// Choose enemies for the spawn spots; deeper floors are busier.
+    fn populate(
+        &mut self,
+        ground: &[(i32, i32)],
+        air: &[(i32, i32)],
+        rooms: &[(i32, i32)],
+    ) -> Vec<Enemy> {
+        let d = self.depth as usize;
+        let mut enemies = Vec::new();
+        let golems = (1 + d).min(rooms.len());
+        for &(x, y) in rooms.iter().take(golems) {
+            enemies.push(Enemy::new(EnemyKind::Golem, x, y));
+        }
+        let scarabs = 10 + 3 * d;
+        for &(x, y) in ground
+            .iter()
+            .filter(|s| !rooms[..golems].contains(s))
+            .take(scarabs)
+        {
+            enemies.push(Enemy::new(EnemyKind::Scarab, x, y));
+        }
+        for &(x, y) in air.iter().take(5 + 2 * d) {
+            enemies.push(Enemy::new(EnemyKind::Wraith, x, y));
+        }
+        enemies
+    }
+
+    /// Generate and enter the next floor (only after clearing this one).
+    pub fn descend(&mut self) -> bool {
+        if self.phase != Phase::Cleared {
+            return false;
+        }
+        self.depth += 1;
+        let seed = self
+            .run_seed
+            .wrapping_mul(0x9E37_79B9)
+            .wrapping_add(self.depth.wrapping_mul(0x85EB_CA6B));
+        self.player.heal(DESCEND_HEAL);
+        for f in &mut self.flasks {
+            f.refill();
+        }
+        self.enter_floor(dune_catacombs(WORLD_W, WORLD_H, seed));
+        true
+    }
+
+    /// Spawn an enemy (tests, debugging).
+    pub fn add_enemy(&mut self, kind: EnemyKind, x: i32, y: i32) {
+        self.enemies.push(Enemy::new(kind, x, y));
+    }
+
+    /// Debug: move the player into the antechamber just above the seal.
+    pub fn debug_warp_to_seal(&mut self) {
+        if let Some(s) = self.seal {
+            let (cx, _) = s.center();
+            self.player.body = crate::body::Body::standing(cx - 10, s.y - 1, PLAYER_W, PLAYER_H);
+        }
     }
 
     pub fn set_input(&mut self, input: Input) {
@@ -123,10 +252,36 @@ impl Game {
         self.active_flask = (self.active_flask as i32 + delta).rem_euclid(n) as usize;
     }
 
-    pub fn step(&mut self) {
-        let input = self.input;
+    pub fn exit(&self) -> Option<Rect> {
+        self.exit
+    }
 
-        if self.player.alive() {
+    pub fn seal(&self) -> Option<Rect> {
+        self.seal
+    }
+
+    /// Whether the floor's wax seal has been melted through.
+    pub fn seal_open(&self) -> bool {
+        self.seal_open
+    }
+
+    pub fn enemies_alive(&self) -> usize {
+        self.enemies.len()
+    }
+
+    pub fn step(&mut self) {
+        let playing = self.phase == Phase::Playing && self.player.alive();
+        let input = if playing {
+            self.input
+        } else {
+            Input {
+                aim_x: self.input.aim_x,
+                aim_y: self.input.aim_y,
+                ..Input::default()
+            }
+        };
+
+        if playing {
             if input.dig {
                 self.dig(input.aim_x, input.aim_y);
             }
@@ -146,64 +301,153 @@ impl Game {
                 };
                 self.flasks[self.active_flask].cast(&mut ctx);
             }
-            if self.player.update(&mut self.world, &input) {
-                self.deaths += 1;
-            }
-        } else {
-            self.player.dead_timer -= 1;
-            if self.player.dead_timer == 0 {
-                self.respawn();
-            }
+            self.player.update(&mut self.world, &input);
         }
 
+        self.update_enemies(playing);
         for flask in &mut self.flasks {
             flask.tick();
         }
-        let (world, rng) = (&mut self.world, &mut self.rng);
-        self.particles.retain_mut(|p| p.update(world, rng));
+        self.update_particles();
         self.world.step();
         self.apply_explosions();
+        self.reap_enemies();
+        self.check_progress();
         self.update_camera();
     }
 
-    /// Blasts near the player hurt and knock them back.
-    fn apply_explosions(&mut self) {
-        let blasts = self.world.take_explosions();
-        if !self.player.alive() {
-            return;
-        }
-        let (px, py) = self.player.center();
-        let mut damage = 0.0;
-        for b in blasts {
-            let (dx, dy) = (px - b.x as f32, py - b.y as f32);
-            let dist = (dx * dx + dy * dy).sqrt();
-            let reach = b.radius as f32 * 2.5 + 4.0;
-            if dist >= reach {
-                continue;
-            }
-            let falloff = 1.0 - dist / reach;
-            damage += 30.0 * falloff * (b.radius as f32 / 7.0).clamp(0.4, 1.5);
-            let (nx, ny) = if dist > 0.01 {
-                (dx / dist, dy / dist)
-            } else {
-                (0.0, -1.0)
-            };
-            self.player.vx += nx * 4.0 * falloff;
-            self.player.vy += ny * 4.0 * falloff - 0.5 * falloff;
-        }
-        if damage > 0.0 {
-            self.player.damage(damage.min(MAX_BLAST_DAMAGE_PER_TICK));
-            if self.player.hp <= 0.0 && self.player.alive() {
-                self.player.kill();
-                self.deaths += 1;
+    fn update_enemies(&mut self, playing: bool) {
+        let target = playing.then(|| self.player.body.clone());
+        for enemy in &mut self.enemies {
+            if let Some(EnemyEvent::Hit { damage, knock_x }) =
+                enemy.update(&mut self.world, target.as_ref(), &mut self.rng)
+            {
+                self.player.hit(damage, knock_x);
             }
         }
     }
 
-    fn respawn(&mut self) {
-        self.player = Player::new(self.spawn.0, self.spawn.1);
-        for flask in &mut self.flasks {
-            flask.refill();
+    fn update_particles(&mut self) {
+        let enemies = &self.enemies;
+        let hit_test = |x: f32, y: f32| {
+            enemies
+                .iter()
+                .position(|e| e.alive() && e.body.contains(x, y))
+        };
+        let (world, rng) = (&mut self.world, &mut self.rng);
+        let mut struck = Vec::new();
+        self.particles
+            .retain_mut(|p| match p.update(world, rng, hit_test) {
+                Flight::Flying => true,
+                Flight::Landed => false,
+                Flight::HitCreature(i) => {
+                    struck.push((i, p.clone()));
+                    false
+                }
+            });
+        for (i, p) in struck {
+            self.enemies[i].struck_by(&p);
+        }
+    }
+
+    /// Blasts hurt and knock back the player and enemies.
+    fn apply_explosions(&mut self) {
+        let blasts = self.world.take_explosions();
+        if blasts.is_empty() {
+            return;
+        }
+        let mut player_damage = 0.0;
+        for b in &blasts {
+            let reach = b.radius as f32 * 2.5 + 4.0;
+            let strength = (b.radius as f32 / 7.0).clamp(0.4, 1.5);
+            let push = |center: (f32, f32)| {
+                let (dx, dy) = (center.0 - b.x as f32, center.1 - b.y as f32);
+                let dist = (dx * dx + dy * dy).sqrt();
+                (dist < reach).then(|| {
+                    let falloff = 1.0 - dist / reach;
+                    let (nx, ny) = if dist > 0.01 {
+                        (dx / dist, dy / dist)
+                    } else {
+                        (0.0, -1.0)
+                    };
+                    (falloff, nx, ny)
+                })
+            };
+            if self.player.alive() {
+                if let Some((f, nx, ny)) = push(self.player.center()) {
+                    player_damage += 30.0 * f * strength;
+                    self.player.vx += nx * 4.0 * f;
+                    self.player.vy += ny * 4.0 * f - 0.5 * f;
+                }
+            }
+            for e in &mut self.enemies {
+                if let Some((f, nx, ny)) = push(e.body.center()) {
+                    e.credited = true;
+                    e.damage(40.0 * f * strength);
+                    e.body.vx += nx * 4.0 * f;
+                    e.body.vy += ny * 4.0 * f - 0.5 * f;
+                }
+            }
+        }
+        if player_damage > 0.0 && self.phase == Phase::Playing {
+            self.player
+                .damage(player_damage.min(MAX_BLAST_DAMAGE_PER_TICK));
+        }
+    }
+
+    /// Remove dead enemies, leaving their remains in the world.
+    fn reap_enemies(&mut self) {
+        let world = &mut self.world;
+        let mut killed = 0;
+        self.enemies.retain(|e| {
+            if e.alive() {
+                return true;
+            }
+            e.remains(world);
+            killed += e.credited as u32;
+            false
+        });
+        if self.phase == Phase::Playing {
+            self.kills += killed;
+        }
+    }
+
+    fn check_progress(&mut self) {
+        if self.phase != Phase::Playing {
+            return;
+        }
+        self.run_ticks += 1;
+        self.floor_ticks += 1;
+        if !self.player.alive() {
+            self.phase = Phase::Dead;
+            self.deaths += 1;
+            return;
+        }
+        if !self.seal_open && self.floor_ticks.is_multiple_of(15) {
+            if let Some(s) = self.seal {
+                // Open once a gap wide enough for the alchemist has been
+                // melted all the way through.
+                let gap = PLAYER_W + 1;
+                self.seal_open = (s.x..=s.x + s.w - gap).any(|x0| {
+                    (x0..x0 + gap)
+                        .all(|x| (s.y..s.y + s.h).all(|y| self.world.get(x, y) != id::WAX))
+                });
+            }
+        }
+        if let Some(exit) = self.exit {
+            // The rift devours any material that falls into it, so sand
+            // pouring through the open seal can never bury the way out.
+            for y in exit.y..exit.y + exit.h {
+                for x in exit.x..exit.x + exit.w {
+                    if self.world.get(x, y) != id::EMPTY {
+                        self.world.set(x, y, id::EMPTY);
+                    }
+                }
+            }
+            let (px, py) = self.player.center();
+            if exit.contains(px as i32, py as i32) {
+                self.phase = Phase::Cleared;
+            }
         }
     }
 
@@ -270,6 +514,17 @@ impl Game {
         self.cam_y += (ty - self.cam_y) * CAMERA_LERP;
     }
 
+    /// Where the compass points: the seal until it is open, then the exit.
+    pub fn objective(&self) -> Option<(f32, f32)> {
+        let r = if self.seal_open {
+            self.exit?
+        } else {
+            self.seal?
+        };
+        let (x, y) = r.center();
+        Some((x as f32, y as f32))
+    }
+
     /// Compose the visible window: cells into `view_cells`, sprites into `overlay`.
     pub fn render(&mut self) {
         let (cx, cy) = self.camera();
@@ -282,16 +537,62 @@ impl Game {
             let glow = if f.volume >= f.cost() { 255 } else { 120 };
             [r, g, b, glow]
         };
-        let dig_ring = self
-            .input
-            .dig
+        let playing = self.phase == Phase::Playing && self.player.alive();
+        let dig_ring = (playing && self.input.dig)
             .then(|| self.dig_target(self.input.aim_x, self.input.aim_y));
+        let objective = self.objective();
+        let tick = self.world.tick_count();
         let mut o = Overlay {
             buf: &mut self.overlay,
             w: vw,
             h: vh,
         };
         o.clear();
+
+        if let Some(exit) = self.exit {
+            let (ex, ey) = exit.center();
+            o.portal(ex - cx, ey - cy, exit.w / 2 + 2, exit.h / 2, tick);
+        }
+
+        for e in &self.enemies {
+            let b = &e.body;
+            let tint = if e.hurt_flash > 0 {
+                Some(Tint::Hurt)
+            } else if e.frozen > 0 {
+                Some(Tint::Frozen)
+            } else if e.burning > 0 && (tick / 3).is_multiple_of(2) {
+                Some(Tint::Burning)
+            } else if e.kind == EnemyKind::Golem && e.temp > 80.0 {
+                Some(Tint::Hot(
+                    ((e.temp - 80.0) / (BAKE_TEMP - 80.0) * 255.0).min(255.0) as u8,
+                ))
+            } else {
+                None
+            };
+            let frame = (e.anim / 8) % 2 == 0;
+            let (x, y) = (b.x - cx, b.y - cy);
+            match e.kind {
+                EnemyKind::Scarab => {
+                    let rows: &[&str] = if frame {
+                        &render::SCARAB
+                    } else {
+                        &render::SCARAB_STEP
+                    };
+                    o.sprite(x, y, rows, render::creature_palette, e.facing, tint);
+                }
+                EnemyKind::Wraith => {
+                    let rows: &[&str] = if frame {
+                        &render::WRAITH_UP
+                    } else {
+                        &render::WRAITH_DOWN
+                    };
+                    o.sprite(x, y, rows, render::creature_palette, e.facing, tint);
+                }
+                EnemyKind::Golem => {
+                    o.sprite(x, y, &render::GOLEM, render::golem_palette, e.facing, tint)
+                }
+            }
+        }
 
         for p in &self.particles {
             let mut c = props(p.mat()).color.map(|v| v.saturating_add(40));
@@ -322,20 +623,28 @@ impl Game {
 
         let pl = &self.player;
         if pl.alive() {
-            o.player(
-                pl.x - cx,
-                pl.y - cy,
-                pl.facing,
-                pl.hurt_flash > 0,
-                flask_color,
-            );
+            let blink = pl.invuln > 0 && (tick / 4).is_multiple_of(2);
+            if !blink {
+                o.player(
+                    pl.x - cx,
+                    pl.y - cy,
+                    pl.facing,
+                    pl.hurt_flash > 0,
+                    flask_color,
+                );
+            }
+        }
+        if playing {
+            if let Some((tx, ty)) = dig_ring {
+                o.ring(tx - cx, ty - cy, DIG_RADIUS, [255, 220, 150, 140]);
+            }
+            if let Some((tx, ty)) = objective {
+                o.compass(tx - cx as f32, ty - cy as f32, [255, 205, 90, 230]);
+            }
             let (ax, ay) = (
                 self.input.aim_x.floor() as i32,
                 self.input.aim_y.floor() as i32,
             );
-            if let Some((tx, ty)) = dig_ring {
-                o.ring(tx - cx, ty - cy, DIG_RADIUS, [255, 220, 150, 140]);
-            }
             o.reticle(ax - cx, ay - cy, [255, 255, 255, 180]);
         }
     }
