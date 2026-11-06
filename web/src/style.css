@@ -1,0 +1,88 @@
+:root {
+  --bg: #0d0c12;
+  --panel: #17151f;
+  --text: #e6e1ef;
+  --muted: #8d869c;
+  --accent: #f0a63a;
+  --border: #2b2738;
+  color-scheme: dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+#stage {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+}
+
+#view {
+  display: block;
+  cursor: crosshair;
+  touch-action: none;
+  image-rendering: pixelated;
+  border: 1px solid var(--border);
+}
+
+#toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 8px 16px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+
+#materials { display: flex; flex-wrap: wrap; gap: 4px; }
+
+#materials button, #controls button {
+  font: inherit;
+  color: var(--text);
+  background: #221f2d;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#materials button[aria-checked="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+#materials .swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid #0006;
+}
+
+#materials kbd { color: var(--muted); font-size: 11px; font-family: inherit; }
+
+#controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#controls label { display: inline-flex; align-items: center; gap: 6px; }
+#brush-size { min-width: 2ch; text-align: right; font-variant-numeric: tabular-nums; }
+
+#stats { color: var(--muted); font-variant-numeric: tabular-nums; }
+#help { margin: 0; color: var(--muted); }

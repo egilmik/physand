@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Physand</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main id="app">
+      <div id="stage">
+        <canvas id="view"></canvas>
+      </div>
+      <aside id="toolbar">
+        <div id="materials" role="radiogroup" aria-label="Material"></div>
+        <div id="controls">
+          <label>Brush <span id="brush-size">4</span>
+            <input id="brush" type="range" min="1" max="24" value="4" />
+          </label>
+          <button id="pause" type="button">Pause</button>
+          <button id="step" type="button" title="Advance one tick (.)">Step</button>
+          <button id="reset" type="button" title="New random scene (R)">New scene</button>
+          <button id="clear" type="button">Clear</button>
+        </div>
+        <div id="stats"></div>
+        <p id="help">Left-drag paint · Right-drag erase · Wheel brush size · 1–9/0 material · Space pause</p>
+      </aside>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
